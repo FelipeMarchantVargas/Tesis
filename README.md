@@ -2,7 +2,8 @@
 
 **Trabajo de Título para Ingeniería Civil Informática**  
 **Autor:** Felipe André Marchant Vargas  
-**Profesor Guía:** Roberto León, PhD  
+**Profesor Guía:** Roberto León, PhD. Computer Science
+**Profesor Co-Guía:** Jorge Díaz, MSc. Computer Science
 **Universidad:** Universidad Técnica Federico Santa María
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)![License](https://img.shields.io/badge/License-MIT-green.svg)
