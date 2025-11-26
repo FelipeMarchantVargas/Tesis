@@ -108,14 +108,17 @@ python evaluate.py \
 
 ## 🧠 Metodología Propuesta
 
-El flujo de trabajo del algoritmo es el siguiente:
+El algoritmo sigue un enfoque de **Muestreo Adaptativo** y **Reconstrucción Continua**:
 
-1.  **Entrada:** Se recibe una imagen a color.
-2.  **Análisis de Prominencia:** La imagen se procesa con una CNN pre-entrenada para generar un mapa de calor (saliency map) que indica las áreas de mayor interés perceptual.
-3.  **Subdivisión Adaptativa:** Se inicia un proceso de subdivisión con Quadtree. Para cada cuadrante, se decide si subdividirlo o no basándose en dos criterios:
-    - La varianza de color del cuadrante (criterio tradicional).
-    - El valor promedio de prominencia en esa región del mapa de calor. A las regiones con alta prominencia se les exige una mayor profundidad de subdivisión.
-4.  **Codificación:** La estructura final del Quadtree y los colores de las hojas se codifican y guardan en un archivo comprimido.
+1.  **Análisis Semántico:** La imagen entra a una CNN que genera un mapa de calor (0.0 a 1.0), indicando qué píxeles son perceptualmente relevantes.
+2.  **Muestreo Híbrido:** Se construye un Quadtree. La decisión de dividir un cuadrante depende de una función de costo que combina la varianza del color y la prominencia media.
+
+    - Zonas Importantes: Umbral de error bajo → Alta densidad de nodos (malla fina).
+
+    - Fondos: Umbral de error alto → Baja densidad (malla gruesa).
+
+3.  **Restricción Topológica:** Se aplica una regla de balanceo para asegurar que ningún nodo tenga una diferencia de nivel mayor a 1 con sus vecinos, evitando grietas en la reconstrucción.
+4.  **Reconstrucción Continua:** En lugar de pintar bloques sólidos, se utiliza Interpolación Bilineal basada en los vértices del Quadtree. Esto genera una imagen suave y libre de artefactos de bloque ($C^0$ continuity).
 
 ## 📄 Licencia
 
