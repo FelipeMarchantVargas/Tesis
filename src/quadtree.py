@@ -1,297 +1,255 @@
-import cv2
 import numpy as np
-from typing import Tuple, List, Optional
+import cv2
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
 
-# ==============================================================================
-# 1. La Estructura de Datos del Nodo
-# ==============================================================================
+@dataclass
 class QuadtreeNode:
-    """
-    Representa un nodo en el Quadtree. Un nodo puede ser una rama (con 4 hijos)
-    o una hoja (sin hijos, con un color definido).
-    """
-    def __init__(self, x: int, y: int, width: int, height: int):
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        
-        # Una lista de 4 hijos. Si está vacía, es un nodo hoja.
-        self.children: List['QuadtreeNode'] = []
-        
-        # El color promedio de la región si el nodo es una hoja.
-        # Se almacena como (B, G, R) para compatibilidad con OpenCV.
-        self.color: Optional[Tuple[float, float, float]] = None
+    """Nodo del Quadtree."""
+    y: int
+    x: int
+    h: int
+    w: int
+    depth: int
+    children: List['QuadtreeNode'] = field(default_factory=list)
+    
+    # Colores (RGB)
+    color_tl: Optional[np.ndarray] = None
+    color_tr: Optional[np.ndarray] = None
+    color_bl: Optional[np.ndarray] = None
+    color_br: Optional[np.ndarray] = None
 
     @property
     def is_leaf(self) -> bool:
-        """Retorna True si el nodo es una hoja (no tiene hijos)."""
-        return not self.children
+        return len(self.children) == 0
 
-# ==============================================================================
-# 2. El Compresor Quadtree
-# ==============================================================================
+    def contains(self, y: int, x: int) -> bool:
+        """Verifica si una coordenada cae dentro de este nodo."""
+        return (self.y <= y < self.y + self.h) and (self.x <= x < self.x + self.w)
+
+class IntegralImageWrapper:
+    """Helper estadístico O(1)."""
+    def __init__(self, img: np.ndarray):
+        self._sat = cv2.integral(img.astype(np.float64))
+        self._sat_sq = cv2.integral(img.astype(np.float64) ** 2)
+
+    def get_stats(self, y: int, x: int, h: int, w: int) -> Tuple[float, float]:
+        y1, x1 = y + h, x + w
+        area_sum = (self._sat[y1, x1] - self._sat[y, x1] - self._sat[y1, x] + self._sat[y, x])
+        area_sq_sum = (self._sat_sq[y1, x1] - self._sat_sq[y, x1] - self._sat_sq[y1, x] + self._sat_sq[y, x])
+        n = h * w
+        if n == 0: return 0.0, 0.0
+        mean = area_sum / n
+        var = (area_sq_sum / n) - (mean ** 2)
+        return mean, max(0.0, var)
+
 class QuadtreeCompressor:
-    """
-    Implementa el algoritmo de compresión y reconstrucción de imágenes
-    basado en un Quadtree tradicional. La subdivisión se basa en la
-    desviación estándar del color de los píxeles.
-    """
-    def __init__(self, threshold: float = 15.0, max_depth: int = 8, min_size: int = 4):
-        """
-        Inicializa el compresor con los parámetros de compresión.
+    """Compresor con soporte para Restricted Quadtree (Balanceado)."""
 
-        Args:
-            threshold (float): El umbral de error (desviación estándar). Regiones
-                               con un error menor a este valor no se subdividen.
-                               Valores más altos = más compresión.
-            max_depth (int): La profundidad máxima del árbol. Limita la subdivisión
-                             en áreas de alto detalle.
-            min_size (int): El tamaño mínimo de un cuadrante para ser subdividido.
-        """
-        self.threshold = threshold
+    def __init__(self, min_block_size: int = 4, max_depth: int = 12):
+        self.min_block_size = min_block_size
         self.max_depth = max_depth
-        self.min_size = min_size
         self.root: Optional[QuadtreeNode] = None
-        self._leaf_nodes = []
-
-    def _calculate_error(self, image_region: np.ndarray) -> float:
-        """
-        Calcula el error de una región. Basado en papers, una métrica robusta
-        es la desviación estándar media de los canales de color.
-        """
-        if image_region.size == 0:
-            return 0.0
-        # Calcula la desviación estándar para cada canal (B, G, R) y luego promedia.
-        b, g, r = cv2.split(image_region)
-        std_dev = (np.std(b) + np.std(g) + np.std(r)) / 3
-        return std_dev
-
-    def _calculate_average_color(self, image_region: np.ndarray) -> Tuple[float, float, float]:
-        """Calcula el color promedio de una región."""
-        # mean() sobre los ejes de pixeles (0 y 1) devuelve el promedio para cada canal.
-        avg_color = np.mean(image_region, axis=(0, 1))
-        return (avg_color[0], avg_color[1], avg_color[2]) # (B, G, R)
-
-    def _subdivide(self, node: QuadtreeNode, image: np.ndarray, 
-                   saliency_map: Optional[np.ndarray], current_depth: int):
-        """
-        Función recursiva que decide si dividir un nodo basándose en el error de color
-        y la importancia perceptual (Saliency Map).
-        """
+        self.leaves: List[QuadtreeNode] = []
         
-        # 1. Condiciones de Parada (Hard Limits)
-        # Si alcanzamos la profundidad máxima o el tamaño mínimo, nos detenemos.
-        if (current_depth >= self.max_depth or 
-            node.width <= self.min_size or 
-            node.height <= self.min_size):
-            node.color = self._calculate_average_color(image)
-            self._leaf_nodes.append(node)
+        # Referencias temporales
+        self._img: Optional[np.ndarray] = None
+        self._integral_img: Optional[IntegralImageWrapper] = None
+        self._integral_saliency: Optional[IntegralImageWrapper] = None
+
+    def compress(self, image_rgb: np.ndarray, saliency_map: np.ndarray, threshold: float, alpha: float):
+        """Flujo principal: Construcción -> Balanceo -> Captura de Datos."""
+        self._img = image_rgb
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        self._integral_img = IntegralImageWrapper(gray)
+        
+        saliency_uint8 = (saliency_map * 255).astype(np.uint8)
+        self._integral_saliency = IntegralImageWrapper(saliency_uint8)
+
+        h, w = image_rgb.shape[:2]
+        self.root = QuadtreeNode(0, 0, h, w, 0)
+        
+        # 1. División Inicial Guiada por Semántica
+        print("[Quadtree] Iniciando división recursiva...")
+        self._recursive_split(self.root, threshold, alpha)
+
+        # 2. Balanceo del Árbol (Restricted Quadtree)
+        print("[Quadtree] Aplicando balanceo 2:1...")
+        self.balance_tree()
+
+        # 3. Finalización: Recolectar hojas finales y extraer colores
+        print("[Quadtree] Capturando datos de color...")
+        self.leaves = []
+        self._collect_leaves_recursive(self.root)
+        
+        # Limpieza
+        self._img = None
+        self._integral_img = None
+        self._integral_saliency = None
+
+    def _recursive_split(self, node: QuadtreeNode, threshold: float, alpha: float):
+        """División basada en error híbrido."""
+        # Check dimensiones mínimas y profundidad máxima
+        if (node.w <= self.min_block_size or node.h <= self.min_block_size or 
+            node.depth >= self.max_depth):
             return
 
-        # 2. Cálculo de Métricas
-        # A. Error estadístico (Desviación estándar del color)
-        std_dev_error = self._calculate_error(image)
+        # Cálculo de Error Híbrido
+        _, variance = self._integral_img.get_stats(node.y, node.x, node.h, node.w)
+        std_dev = np.sqrt(variance)
         
-        # B. Factor de Importancia (Semántico)
-        importance_factor = 0.0
-        if saliency_map is not None and saliency_map.size > 0:
-            # Calculamos el promedio de prominencia en esta región (0.0 a 1.0)
-            importance_factor = np.mean(saliency_map)
+        mean_saliency_uint8, _ = self._integral_saliency.get_stats(node.y, node.x, node.h, node.w)
+        saliency_mean = mean_saliency_uint8 / 255.0
 
-        # 3. Cálculo del Umbral Dinámico (Lógica Híbrida)
-        # Definimos 'alpha' aquí (o podrías pasarlo en __init__).
-        # alpha = 0.8 significa que la IA tiene un 80% de influencia en reducir el umbral.
-        alpha = 0.8 
-        
-        # Fórmula: Si importance_factor es alto (1.0), el umbral efectivo se reduce.
-        # Umbral bajo = Mayor sensibilidad = Más subdivisiones = Más calidad.
-        effective_threshold = self.threshold * (1.0 - (alpha * importance_factor))
+        effective_threshold = threshold * (1.0 - (alpha * saliency_mean))
 
-        # 4. Decisión de Subdivisión
-        # Si el error actual es menor que nuestro umbral ajustado, consideramos
-        # que la región es suficientemente homogénea y no dividimos más.
-        if std_dev_error < effective_threshold:
-            node.color = self._calculate_average_color(image)
-            self._leaf_nodes.append(node)
-            return
+        effective_threshold = max(effective_threshold, 1.0)
 
-        # 5. Ejecución de la Subdivisión (Recursión)
-        # Calculamos dimensiones locales para cortar los arrays
-        h_local, w_local = image.shape[:2]
-        half_w = w_local // 2
-        half_h = h_local // 2
+        # Ahora comparamos el error real (std_dev) contra este umbral que se encogió
+        if std_dev > effective_threshold:
+            self._split_node(node)
+            for child in node.children:
+                self._recursive_split(child, threshold, alpha)
+
+    def _split_node(self, node: QuadtreeNode):
+        """Divide un nodo geométricamente."""
+        half_w = node.w // 2
+        half_h = node.h // 2
+        y, x = node.y, node.x
+        y_mid, x_mid = y + half_h, x + half_w
         
-        # Definimos puntos medios absolutos para las coordenadas de los nodos hijos
-        mid_x = node.x + half_w
-        mid_y = node.y + half_h
-        
-        # Configuración de los 4 hijos: (x_abs, y_abs, w, h)
-        children_coords = [
-            (node.x, node.y, half_w, half_h),           # NW (Noroeste)
-            (mid_x, node.y, w_local - half_w, half_h),  # NE (Noreste)
-            (node.x, mid_y, half_w, h_local - half_h),  # SW (Suroeste)
-            (mid_x, mid_y, w_local - half_w, h_local - half_h) # SE (Sureste)
-        ]
-        
-        # Definimos los cortes (slices) para los arrays numpy (image y saliency)
-        # Corresponden a: [slice_y, slice_x]
-        slices = [
-            (slice(0, half_h), slice(0, half_w)),              # NW
-            (slice(0, half_h), slice(half_w, w_local)),        # NE
-            (slice(half_h, h_local), slice(0, half_w)),        # SW
-            (slice(half_h, h_local), slice(half_w, w_local))   # SE
+        node.children = [
+            QuadtreeNode(y, x, half_h, half_w, node.depth + 1),         # TL
+            QuadtreeNode(y, x_mid, half_h, node.w - half_w, node.depth + 1), # TR
+            QuadtreeNode(y_mid, x, node.h - half_h, half_w, node.depth + 1), # BL
+            QuadtreeNode(y_mid, x_mid, node.h - half_h, node.w - half_w, node.depth + 1) # BR
         ]
 
-        for (nx, ny, nw, nh), (sl_y, sl_x) in zip(children_coords, slices):
-            # Crear nodo hijo
-            child_node = QuadtreeNode(nx, ny, nw, nh)
-            node.children.append(child_node)
-            
-            # Recortar imagen para el hijo
-            child_image = image[sl_y, sl_x]
-            
-            # Recortar mapa de prominencia para el hijo (si existe)
-            child_saliency = None
-            if saliency_map is not None:
-                child_saliency = saliency_map[sl_y, sl_x]
-            
-            # Llamada recursiva pasando los recortes
-            self._subdivide(child_node, child_image, child_saliency, current_depth + 1)
-
-    def compress(self, image: np.ndarray, saliency_map: Optional[np.ndarray] = None):
-        """
-        Comprime la imagen dada construyendo el Quadtree.
-        Acepta un mapa de prominencia opcional.
-        """
-        self._leaf_nodes = [] # Reiniciar la lista de hojas
-        height, width, _ = image.shape
-        self.root = QuadtreeNode(0, 0, width, height)
-        
-        # CORRECCIÓN AQUÍ:
-        # Pasamos el saliency_map (que puede ser None) a la función recursiva.
-        self._subdivide(self.root, image, saliency_map, 0)
-        
-        print(f"Compresión completada. Número de nodos hoja: {len(self._leaf_nodes)}")
-
-    def reconstruct(self) -> Optional[np.ndarray]:
-        """
-        Reconstruye la imagen a partir de los nodos hoja del Quadtree.
-        """
-        if not self.root:
-            print("Error: El árbol está vacío. Ejecuta compress() primero.")
+    def _get_leaf_at(self, y: int, x: int) -> Optional[QuadtreeNode]:
+        """Busca la hoja que contiene la coordenada (y, x) descendiendo desde la raíz."""
+        # Validación de límites de imagen
+        if not self.root.contains(y, x):
             return None
             
-        # Crea un lienzo negro del tamaño de la imagen original
-        image_shape = (self.root.height, self.root.width, 3)
-        reconstructed_image = np.zeros(image_shape, dtype=np.uint8)
-        
-        # Dibuja un rectángulo para cada hoja
-        for leaf in self._leaf_nodes:
-            # Convierte el color promedio a valores enteros de 8 bits
-            color_bgr = tuple(int(c) for c in leaf.color)
-            
-            top_left = (leaf.x, leaf.y)
-            bottom_right = (leaf.x + leaf.width, leaf.y + leaf.height)
-            
-            cv2.rectangle(reconstructed_image, top_left, bottom_right, color_bgr, -1) # -1 para rellenar
-            
-        return reconstructed_image
-    
-    def visualize_structure(self, background_image: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
-        """
-        Dibuja los bordes de los nodos hoja para visualizar la densidad del Quadtree.
-        Si se pasa una imagen de fondo, dibuja sobre ella. Si no, usa un fondo negro.
-        """
-        if not self.root:
-            print("Error: El árbol está vacío. Ejecuta compress() primero.")
-            return None
+        curr = self.root
+        while not curr.is_leaf:
+            # Determinar en qué hijo cae el punto
+            found = False
+            for child in curr.children:
+                if child.contains(y, x):
+                    curr = child
+                    found = True
+                    break
+            if not found:
+                return None # No debería ocurrir si la lógica es correcta
+        return curr
 
-        # 1. Preparar el lienzo (Canvas)
-        height, width = self.root.height, self.root.width
+    def balance_tree(self):
+        """
+        Asegura la restricción de nivel.
+        Itera hasta que no haya violaciones de la regla: |depth_node - depth_neighbor| <= 1.
+        """
+        balanced = False
+        pass_count = 0
         
-        if background_image is not None:
-            # Si nos dan una imagen, trabajamos sobre una copia para no alterar la original
-            canvas = background_image.copy()
-            # Usaremos color verde brillante para que resalte sobre la foto
-            line_color = (0, 255, 0) 
+        while not balanced:
+            balanced = True
+            pass_count += 1
+            # Recolectamos hojas actuales (esto cambia dinámicamente si dividimos)
+            current_leaves = []
+            self._collect_leaves_no_data(self.root, current_leaves)
+            
+            for leaf in current_leaves:
+                # Puntos de chequeo en los 4 vecinos (midpoints de los bordes)
+                # Usamos coordenadas ligeramente fuera del nodo
+                mid_y = leaf.y + leaf.h // 2
+                mid_x = leaf.x + leaf.w // 2
+                
+                neighbor_points = [
+                    (leaf.y - 1, mid_x),          # Norte
+                    (leaf.y + leaf.h, mid_x),     # Sur
+                    (mid_y, leaf.x - 1),          # Oeste
+                    (mid_y, leaf.x + leaf.w)      # Este
+                ]
+
+                for ny, nx in neighbor_points:
+                    neighbor = self._get_leaf_at(ny, nx)
+                    
+                    if neighbor is None:
+                        continue # Borde de la imagen
+
+                    # La Regla:
+                    # Si mi vecino es mucho MENOS profundo que yo (más grande),
+                    # y la diferencia es > 1, el vecino debe dividirse.
+                    # (Nota: Si yo soy el menos profundo, eventualmente se iterará sobre mi vecino
+                    # y él me detectará a mí. Solo necesitamos manejar un sentido de la desigualdad).
+                    
+                    if leaf.depth > neighbor.depth + 1:
+                        # El vecino es demasiado grande comparado conmigo. Dividirlo.
+                        self._split_node(neighbor)
+                        balanced = False 
+                        # IMPORTANTE: Al dividir, invalidamos la lista `current_leaves`.
+                        # Rompemos el bucle interno para reiniciar la recolección de hojas.
+                        break 
+                
+                if not balanced:
+                    break
+            
+            if pass_count > 50: # Safety break
+                print("Advertencia: Límite de pases de balanceo alcanzado.")
+                break
+
+    def _collect_leaves_no_data(self, node: QuadtreeNode, acc: List[QuadtreeNode]):
+        """Auxiliar rápido para balanceo."""
+        if node.is_leaf:
+            acc.append(node)
         else:
-            # Si no, creamos un fondo negro
-            canvas = np.zeros((height, width, 3), dtype=np.uint8)
-            # Usaremos color blanco o verde
-            line_color = (0, 255, 0) 
+            for child in node.children:
+                self._collect_leaves_no_data(child, acc)
 
-        # 2. Dibujar los rectángulos
-        for leaf in self._leaf_nodes:
-            top_left = (leaf.x, leaf.y)
-            bottom_right = (leaf.x + leaf.width, leaf.y + leaf.height)
+    def _collect_leaves_recursive(self, node: QuadtreeNode):
+        """Recolección final que además captura los colores."""
+        if node.is_leaf:
+            self._capture_leaf_data(node)
+            self.leaves.append(node)
+        else:
+            for child in node.children:
+                self._collect_leaves_recursive(child)
+
+    def _capture_leaf_data(self, node: QuadtreeNode):
+        """Extrae colores de la imagen original."""
+        h_img, w_img = self._img.shape[:2]
+        y0, x0 = node.y, node.x
+        y1, x1 = min(node.y + node.h - 1, h_img - 1), min(node.x + node.w - 1, w_img - 1)
+        
+        node.color_tl = self._img[y0, x0].astype(np.float32)
+        node.color_tr = self._img[y0, x1].astype(np.float32)
+        node.color_bl = self._img[y1, x0].astype(np.float32)
+        node.color_br = self._img[y1, x1].astype(np.float32)
+
+    def reconstruct(self, output_shape: Tuple[int, int]) -> np.ndarray:
+        """Reconstrucción vectorizada (Igual que antes)."""
+        canvas = np.zeros((output_shape[0], output_shape[1], 3), dtype=np.float32)
+
+        for node in self.leaves:
+            if node.color_tl is None: continue 
+
+            x_range = np.linspace(0, 1, node.w).astype(np.float32)
+            y_range = np.linspace(0, 1, node.h).astype(np.float32)
+            xv, yv = np.meshgrid(x_range, y_range)
+            xv = xv[..., np.newaxis] 
+            yv = yv[..., np.newaxis]
+
+            top = node.color_tl * (1 - xv) + node.color_tr * xv
+            bottom = node.color_bl * (1 - xv) + node.color_br * xv
+            patch = top * (1 - yv) + bottom * yv
             
-            # El argumento 'thickness=1' dibuja solo el borde.
-            cv2.rectangle(canvas, top_left, bottom_right, line_color, 1)
+            canvas[node.y : node.y + node.h, node.x : node.x + node.w] = patch
 
-        return canvas
-
-# ==============================================================================
-# 3. Bloque de Ejecución para Prueba
-# ==============================================================================
-if __name__ == '__main__':
-    # --- 1. Carga y Configuración ---
-    image_path = 'data/test_image_1.jpg' # Asegúrate que esta ruta exista o cambia el nombre
-    try:
-        original_image = cv2.imread(image_path)
-        if original_image is None:
-            raise FileNotFoundError(f"No se pudo cargar la imagen en: {image_path}")
-    except FileNotFoundError as e:
-        print(e)
-        exit()
-
-    # Redimensionar para pruebas rápidas
-    h, w, _ = original_image.shape
-    scale = 512 / max(h, w)
-    small_image = cv2.resize(original_image, (int(w*scale), int(h*scale)))
+        return np.clip(canvas, 0, 255).astype(np.uint8)
     
-    # --- 2. GENERACIÓN DE MAPA DE PROMINENCIA MOCK (Simulación) ---
-    # Creamos un círculo blanco difuso en el centro para simular que eso es "importante"
-    # Esto probará si tu lógica híbrida realmente subdivide más ahí.
-    h_small, w_small, _ = small_image.shape
-    saliency_mock = np.zeros((h_small, w_small), dtype=np.float32)
-    
-    center_x, center_y = w_small // 2, h_small // 2
-    Y, X = np.ogrid[:h_small, :w_small]
-    dist_from_center = np.sqrt((X - center_x)**2 + (Y - center_y)**2)
-    
-    # Gradiente: 1.0 en el centro, bajando a 0.0 en los bordes
-    radius = min(h_small, w_small) // 2
-    saliency_mock = 1.0 - np.clip(dist_from_center / radius, 0, 1)
-    
-    # Visualizar el mapa de saliencia (opcional, para que veas qué le pasamos)
-    cv2.imwrite('results/debug_saliency_mock.png', (saliency_mock * 255).astype(np.uint8))
-
-    # --- 3. Compresión ---
-    # Ajusta threshold y alpha en tu código para ver el efecto.
-    # Un threshold alto (ej. 30) normalmente comprimiría mucho, 
-    # pero el mapa de saliencia debería forzar detalle en el centro.
-    compressor = QuadtreeCompressor(threshold=20, max_depth=8, min_size=4)
-    
-    print("Comprimiendo con guía de prominencia simulada...")
-    # Pasamos el mapa simulado aquí
-    compressor.compress(small_image, saliency_map=saliency_mock) 
-    
-    # --- 4. Visualizaciones ---
-    print("Generando visualización de estructura...")
-    
-    # A) Ver la malla sobre fondo negro
-    structure_viz = compressor.visualize_structure()
-    cv2.imwrite('results/debug_structure_black.png', structure_viz)
-    
-    # B) Ver la malla sobre la imagen original (Muy útil)
-    overlay_viz = compressor.visualize_structure(background_image=small_image)
-    cv2.imwrite('results/debug_structure_overlay.png', overlay_viz)
-
-    # C) Reconstrucción normal (Pintada)
-    reconstructed_image = compressor.reconstruct()
-    cv2.imwrite('results/output_reconstructed.png', reconstructed_image)
-
-    print(f"¡Listo! Revisa la carpeta 'results/'.")
-    print(f"- debug_saliency_mock.png: El mapa de guía.")
-    print(f"- debug_structure_overlay.png: La malla verde sobre tu foto (Aquí deberías ver más densidad en el centro).")
+    def visualize_structure(self, image_shape: Tuple[int, int]) -> np.ndarray:
+        vis = np.zeros((image_shape[0], image_shape[1], 3), dtype=np.uint8)
+        for node in self.leaves:
+            cv2.rectangle(vis, (node.x, node.y), (node.x + node.w, node.y + node.h), (0, 255, 128), 1)
+        return vis
