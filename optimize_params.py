@@ -1,119 +1,141 @@
 import optuna
 import cv2
 import numpy as np
-import pickle
-import zlib
+import pandas as pd
+import os
+import tqdm
 from pathlib import Path
+
+# Importaciones de tu proyecto
+# Asegúrate de que src.quadtree tenga la lógica de 'np.exp' en _recursive_split
 from src.quadtree import QuadtreeCompressor
 from src.saliency import SaliencyDetector
 from src.metrics import QualityMetrics
+from src.codec import QuadtreeCodec
 
-# --- CONFIGURACIÓN ---
-# Usamos pocas imágenes para que la optimización sea rápida (1-2 minutos)
-# Elige 3 imágenes representativas de tu carpeta data/kodak
-TRAIN_IMAGES = ["data/kodak/kodim04.png", "data/kodak/kodim15.png", "data/kodak/kodim23.png"] 
-MODEL_PATH = "models/u2net.pth"
-
-# Inicializamos motores fuera del bucle para no recargar modelo cada vez
-print("Cargando motores...")
-saliency_detector = SaliencyDetector(weights_path=MODEL_PATH)
-metrics_engine = QualityMetrics()
-
-# Cacheamos las imágenes y mapas de saliencia en RAM para velocidad extrema
-cache_data = []
-for img_path_str in TRAIN_IMAGES:
-    path = Path(img_path_str)
-    if not path.exists():
-        continue
-    img_bgr = cv2.imread(str(path))
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+def run_optimization():
+    # --- CONFIGURACIÓN ---
+    DATASET_DIR = Path("data/kodak")
+    MODEL_PATH = "models/u2net.pth"
     
-    # Pre-calculamos el mapa de saliencia (es fijo, no depende de alpha)
-    smap = saliency_detector.get_saliency_map(img_rgb)
+    # N_TRIALS: 50 es suficiente para encontrar una buena zona.
+    N_TRIALS = 50 
     
-    cache_data.append({
-        'rgb': img_rgb,
-        'smap': smap,
-        'pixels': img_rgb.shape[0] * img_rgb.shape[1]
-    })
+    # Lambda (λ): El balance entre Calidad y Peso.
+    # J = LPIPS + λ * BPP
+    # Valor empírico: 0.07 prioriza una compresión media-alta con buena calidad.
+    LAMBDA = 0.07 
 
-print(f"Optimización lista con {len(cache_data)} imágenes en caché.")
+    print("--- Configurando Optimización Rate-Distortion (Lagrangiana) ---")
 
-def objective(trial):
-    """
-    Esta función es ejecutada por Optuna cientos de veces.
-    Optuna sugiere valores para 'threshold' y 'alpha'.
-    Nosotros devolvemos un 'score' (menor es mejor).
-    """
-    # 1. Sugerir Hiperparámetros
-    # Rango de búsqueda para el threshold (ej. entre 10 y 200)
-    threshold = trial.suggest_float("threshold", 10.0, 200.0)
+    if not DATASET_DIR.exists():
+        print(f"ERROR: No existe {DATASET_DIR}")
+        return
+
+    image_paths = sorted(list(DATASET_DIR.glob("*.png")))
+    if not image_paths:
+        print("ERROR: Carpeta vacía.")
+        return
+
+    # 1. Inicializar Motores
+    print("Cargando modelos...")
+    saliency_detector = SaliencyDetector(weights_path=MODEL_PATH)
+    metrics_engine = QualityMetrics()
+    codec = QuadtreeCodec()
+
+    # 2. Cachear Dataset (Para no re-leer disco ni re-calcular Saliencia)
+    # Seleccionamos un subconjunto representativo si son muchas imágenes (ej. 10)
+    # para que la optimización sea rápida. Si tienes GPU, usa todas.
+    subset_paths = image_paths[:10] # Usamos las primeras 10 para calibrar rápido
+    cache_data = []
     
-    # Rango de búsqueda para alpha (ej. entre 0.0 y 1.0)
-    # alpha 0.0 = Quadtree normal. alpha 1.0 = Máxima influencia de IA.
-    alpha = trial.suggest_float("alpha", 0.0, 1.0)
-
-    total_loss = 0.0
-
-    # 2. Probar en el set de entrenamiento
-    for data in cache_data:
-        img_rgb = data['rgb']
-        smap = data['smap']
-        pixels = data['pixels']
+    print(f"Pre-cargando {len(subset_paths)} imágenes en RAM...")
+    for path in tqdm.tqdm(subset_paths):
+        img_bgr = cv2.imread(str(path))
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         h, w = img_rgb.shape[:2]
-
-        # A. Comprimir
-        compressor = QuadtreeCompressor(min_block_size=4, max_depth=10)
-        compressor.compress(img_rgb, smap, threshold=threshold, alpha=alpha)
         
-        # B. Reconstruir
-        rec_rgb = compressor.reconstruct((h, w))
+        # Mapa de Saliencia (Constante durante toda la optimización)
+        smap = saliency_detector.get_saliency_map(img_rgb)
         
-        # C. Calcular BPP Real
-        payload = {'leaves': compressor.leaves, 'shape': (h, w)}
-        compressed = zlib.compress(pickle.dumps(payload), level=9)
-        bpp = (len(compressed) * 8) / pixels
+        cache_data.append({
+            'rgb': img_rgb,
+            'smap': smap,
+            'shape': (h, w),
+            'pixels': h * w
+        })
 
-        # D. Calcular LPIPS (Calidad)
-        scores = metrics_engine.calculate_all(img_rgb, rec_rgb)
-        lpips_score = scores['lpips']
-
-        # --- LA FÓRMULA MÁGICA (Función de Costo) ---
-        # Queremos bajo LPIPS y bajo BPP.
-        # Lambda (0.15) es cuánto nos importa el tamaño vs la calidad.
-        # Si subes 0.15 a 0.5, Optuna preferirá archivos más pequeños.
-        # Si bajas a 0.05, Optuna preferirá más calidad.
-        loss = lpips_score + (0.15 * bpp)
+    # --- FUNCIÓN OBJETIVO ---
+    def objective(trial):
+        # 1. Sugerencia de Hiperparámetros
         
-        total_loss += loss
+        # Threshold: Rango amplio. De 10 (muy detallado) a 120 (muy comprimido)
+        threshold = trial.suggest_float("threshold", 10.0, 120.0)
+        
+        # Alpha (Exponencial): Rango ajustado a la fórmula np.exp(-alpha * S)
+        # 0.0 = Sin efecto. 5.0 = Efecto muy agresivo en zonas salientes.
+        alpha = trial.suggest_float("alpha", 0.0, 5.0)
 
-    # Devolvemos el promedio de pérdida
-    return total_loss / len(cache_data)
+        total_cost = 0.0
 
-if __name__ == "__main__":
-    # Creamos el estudio
+        # 2. Evaluar sobre el dataset cacheado
+        for data in cache_data:
+            img_rgb = data['rgb']
+            smap = data['smap']
+            h, w = data['shape']
+            
+            # A. Compresión
+            compressor = QuadtreeCompressor(min_block_size=4, max_depth=10)
+            # Nota: Asegúrate que compressor.compress use internamente la fórmula exponencial
+            compressor.compress(img_rgb, smap, threshold=threshold, alpha=alpha)
+            
+            # B. Cálculo de BPP REAL (Usando mode='gradient' porque es tu método propuesto)
+            try:
+                # mode='gradient' guarda 12 bytes/hoja (interpolación)
+                compressed_bytes = codec.compress(compressor.root, (h, w), mode='gradient')
+                bpp = (len(compressed_bytes) * 8) / data['pixels']
+            except Exception as e:
+                # Si falla algo (ej. árbol vacío), penalizamos infinito
+                return float('inf')
+
+            # C. Reconstrucción y Calidad
+            rec_rgb = compressor.reconstruct((h, w))
+            
+            # Usamos LPIPS como métrica principal de distorsión (D)
+            # LPIPS bajo es mejor (0.0 es idéntico)
+            scores = metrics_engine.calculate_all(img_rgb, rec_rgb)
+            lpips_val = scores['lpips']
+            
+            # --- COSTO LAGRANGIANO ---
+            # Optuna minimizará este valor.
+            # Buscamos el mejor compromiso entre calidad (LPIPS) y peso (BPP)
+            loss = lpips_val + (LAMBDA * bpp)
+            
+            total_cost += loss
+
+        # Promedio del costo en el dataset
+        return total_cost / len(cache_data)
+
+    # --- EJECUCIÓN ---
+    # Usamos TPE (Tree-structured Parzen Estimator) que es el default de Optuna, es excelente.
     study = optuna.create_study(direction="minimize")
     
-    print("--- Iniciando búsqueda de hiperparámetros (50 trials) ---")
-    # n_trials=50 es un buen número para empezar (tardará unos 5-10 mins)
-    study.optimize(objective, n_trials=50)
+    print("\nIniciando búsqueda de hiperparámetros...")
+    study.optimize(objective, n_trials=N_TRIALS)
 
-    print("\n--- ¡Optimización Terminada! ---")
-    print("Mejores parámetros encontrados:")
-    print(study.best_params)
-    print(f"Mejor Score: {study.best_value:.4f}")
+    print("\n" + "="*40)
+    print(" RESULTADOS DE OPTIMIZACIÓN")
+    print("="*40)
+    print(f"Mejor Loss (J): {study.best_value:.4f}")
+    print("Mejores Parámetros:")
+    print(f"  Threshold (Base): {study.best_params['threshold']:.4f}")
+    print(f"  Alpha (Fuerza):   {study.best_params['alpha']:.4f}")
     
-    # Guardar resultados para análisis
+    # Guardar
+    os.makedirs("results", exist_ok=True)
     df = study.trials_dataframe()
-    df.to_csv("results/optuna_results.csv")
-    
-    # Generar gráficos de importancia (¡Oro para la tesis!)
-    try:
-        fig1 = optuna.visualization.plot_param_importances(study)
-        fig1.write_image("results/optuna_importance.png")
-        
-        fig2 = optuna.visualization.plot_contour(study, params=["alpha", "threshold"])
-        fig2.write_image("results/optuna_contour.png")
-        print("Gráficos guardados en results/")
-    except Exception as e:
-        print(f"No se pudieron guardar gráficos interactivos (falta kaleido?): {e}")
+    df.to_csv("results/optuna_results_robust.csv", index=False)
+    print("Log guardado en results/optuna_results_robust.csv")
+
+if __name__ == "__main__":
+    run_optimization()

@@ -11,30 +11,33 @@ from typing import Dict, Any
 # Importaciones locales (Asumiendo estructura src/)
 from src.saliency import SaliencyDetector
 from src.quadtree import QuadtreeCompressor, QuadtreeNode
+from src.codec import QuadtreeCodec
 
-def save_compressed_data(filepath: str, data: Dict[str, Any]):
-    """Serializa, comprime (zlib) y guarda los datos en disco."""
+def save_compressed_data(filepath: str, compressor_instance, shape):
+    """Guarda usando el QuadtreeCodec (Binario optimizado)."""
     try:
-        serialized = pickle.dumps(data)
-        compressed = zlib.compress(serialized, level=9) # Máxima compresión
-        with open(filepath, 'wb') as f:
-            f.write(compressed)
+        codec = QuadtreeCodec()
+        # Aquí ocurre la magia: Árbol -> Bytes -> Zlib
+        compressed_bytes = codec.compress(compressor_instance.root, shape)
         
-        orig_size = sys.getsizeof(serialized)
-        comp_size = sys.getsizeof(compressed)
-        ratio = (1 - (comp_size / orig_size)) * 100
-        print(f"[IO] Guardado en {filepath}. Ratio compresión zlib: {ratio:.2f}%")
+        with open(filepath, 'wb') as f:
+            f.write(compressed_bytes)
+            
+        print(f"[IO] Guardado optimizado en {filepath}. Tamaño: {len(compressed_bytes)/1024:.2f} KB")
     except Exception as e:
         print(f"[Error] Fallo al guardar archivo: {e}")
         sys.exit(1)
 
-def load_compressed_data(filepath: str) -> Dict[str, Any]:
-    """Lee, descomprime y deserializa los datos."""
+def load_compressed_data(filepath: str):
+    """Carga y reconstruye el árbol desde bytes."""
     try:
         with open(filepath, 'rb') as f:
-            compressed = f.read()
-        serialized = zlib.decompress(compressed)
-        return pickle.loads(serialized)
+            compressed_bytes = f.read()
+            
+        codec = QuadtreeCodec()
+        root, shape = codec.decompress(compressed_bytes)
+        
+        return root, shape
     except Exception as e:
         print(f"[Error] Fallo al cargar archivo {filepath}: {e}")
         sys.exit(1)
@@ -96,17 +99,17 @@ def handle_reconstruct(args):
     """Flujo de Reconstrucción."""
     print(f"--- Iniciando Reconstrucción: {args.input} ---")
     
-    # 1. Cargar Datos
-    data = load_compressed_data(args.input)
-    shape = data['shape']
-    leaves = data['leaves']
-    
-    print(f"[1/2] Datos cargados. Dimensiones: {shape}. Nodos: {len(leaves)}")
+    # Cargamos usando el nuevo codec
+    root, shape = load_compressed_data(args.input)
+    print(f"[1/2] Datos decodificados. Dimensiones: {shape}")
 
-    # 2. Reconstruir
-    # Instanciamos el compresor solo para usar sus métodos de utilidad
+    # Preparamos compresor para reconstruir
     compressor = QuadtreeCompressor()
-    compressor.leaves = leaves
+    compressor.root = root 
+    # Importante: Necesitamos reconstruir la lista de hojas (leaves) para el renderizado
+    # porque el codec solo recuperó la estructura de árbol.
+    compressor.leaves = []
+    compressor._collect_leaves_recursive(compressor.root) # Usamos el método existente para llenar la lista
     
     start_time = time.time()
     rec_rgb = compressor.reconstruct(shape)

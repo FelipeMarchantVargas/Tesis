@@ -46,6 +46,8 @@ class IntegralImageWrapper:
 class QuadtreeCompressor:
     """Compresor con soporte para Restricted Quadtree (Balanceado)."""
 
+    _grid_cache = {}
+
     def __init__(self, min_block_size: int = 4, max_depth: int = 12):
         self.min_block_size = min_block_size
         self.max_depth = max_depth
@@ -56,6 +58,16 @@ class QuadtreeCompressor:
         self._img: Optional[np.ndarray] = None
         self._integral_img: Optional[IntegralImageWrapper] = None
         self._integral_saliency: Optional[IntegralImageWrapper] = None
+    
+    def _get_interpolation_grids(self, h: int, w: int):
+        """Devuelve grids cacheados para evitar meshgrid en cada hoja."""
+        key = (h, w)
+        if key not in self._grid_cache:
+            x_range = np.linspace(0, 1, w, dtype=np.float32)
+            y_range = np.linspace(0, 1, h, dtype=np.float32)
+            xv, yv = np.meshgrid(x_range, y_range)
+            self._grid_cache[key] = (xv[..., np.newaxis], yv[..., np.newaxis])
+        return self._grid_cache[key]
 
     def compress(self, image_rgb: np.ndarray, saliency_map: np.ndarray, threshold: float, alpha: float):
         """Flujo principal: Construcción -> Balanceo -> Captura de Datos."""
@@ -101,9 +113,8 @@ class QuadtreeCompressor:
         mean_saliency_uint8, _ = self._integral_saliency.get_stats(node.y, node.x, node.h, node.w)
         saliency_mean = mean_saliency_uint8 / 255.0
 
-        effective_threshold = threshold * (1.0 - (alpha * saliency_mean))
-
-        effective_threshold = max(effective_threshold, 1.0)
+        effective_threshold = threshold * np.exp(-alpha * saliency_mean)
+        effective_threshold = max(effective_threshold, 1.0) # Evitar cero
 
         # Ahora comparamos el error real (std_dev) contra este umbral que se encogió
         if std_dev > effective_threshold:
@@ -146,58 +157,54 @@ class QuadtreeCompressor:
 
     def balance_tree(self):
         """
-        Asegura la restricción de nivel.
-        Itera hasta que no haya violaciones de la regla: |depth_node - depth_neighbor| <= 1.
+        Balanceo 'Ripple' (Olas): Usa una cola para propagar divisiones.
+        Solo re-verificamos nodos que han sido tocados o sus vecinos.
         """
-        balanced = False
-        pass_count = 0
+        # 1. Recolectar todas las hojas iniciales
+        process_queue = []
+        self._collect_leaves_no_data(self.root, process_queue)
         
-        while not balanced:
-            balanced = True
-            pass_count += 1
-            # Recolectamos hojas actuales (esto cambia dinámicamente si dividimos)
-            current_leaves = []
-            self._collect_leaves_no_data(self.root, current_leaves)
+        # Convertimos la lista en un set para búsqueda rápida (opcional si usamos flags)
+        # Pero para simplicidad, usaremos la cola directa.
+        
+        idx = 0
+        while idx < len(process_queue):
+            node = process_queue[idx]
+            idx += 1
             
-            for leaf in current_leaves:
-                # Puntos de chequeo en los 4 vecinos (midpoints de los bordes)
-                # Usamos coordenadas ligeramente fuera del nodo
-                mid_y = leaf.y + leaf.h // 2
-                mid_x = leaf.x + leaf.w // 2
-                
-                neighbor_points = [
-                    (leaf.y - 1, mid_x),          # Norte
-                    (leaf.y + leaf.h, mid_x),     # Sur
-                    (mid_y, leaf.x - 1),          # Oeste
-                    (mid_y, leaf.x + leaf.w)      # Este
-                ]
+            if not node.is_leaf: continue # Si ya se dividió en el proceso, saltar
 
-                for ny, nx in neighbor_points:
-                    neighbor = self._get_leaf_at(ny, nx)
-                    
-                    if neighbor is None:
-                        continue # Borde de la imagen
-
-                    # La Regla:
-                    # Si mi vecino es mucho MENOS profundo que yo (más grande),
-                    # y la diferencia es > 1, el vecino debe dividirse.
-                    # (Nota: Si yo soy el menos profundo, eventualmente se iterará sobre mi vecino
-                    # y él me detectará a mí. Solo necesitamos manejar un sentido de la desigualdad).
-                    
-                    if leaf.depth > neighbor.depth + 1:
-                        # El vecino es demasiado grande comparado conmigo. Dividirlo.
-                        self._split_node(neighbor)
-                        balanced = False 
-                        # IMPORTANTE: Al dividir, invalidamos la lista `current_leaves`.
-                        # Rompemos el bucle interno para reiniciar la recolección de hojas.
-                        break 
-                
-                if not balanced:
-                    break
+            # Buscar vecinos que violen la regla.
+            # Nota: En quadtree de punteros sin "parent pointers", la búsqueda de vecinos
+            # sigue siendo costosa. Si puedes agregar 'parent' a tu nodo, esto sería O(1).
+            # Asumiremos la búsqueda top-down pero optimizada:
             
-            if pass_count > 50: # Safety break
-                print("Advertencia: Límite de pases de balanceo alcanzado.")
-                break
+            # Estrategia: Chequear los 4 puntos medios externos
+            neighbors = self._find_neighbors_of(node)
+            
+            for neighbor in neighbors:
+                if neighbor.is_leaf and neighbor.depth < node.depth - 1:
+                    # El vecino es muy grande (> 1 nivel de diferencia). Dividir.
+                    self._split_node(neighbor)
+                    
+                    # Al dividir al vecino, sus hijos nuevos deben ser verificados
+                    # para ver si ahora ellos violan reglas con SUS vecinos.
+                    process_queue.extend(neighbor.children)
+
+    def _find_neighbors_of(self, node: QuadtreeNode) -> List[QuadtreeNode]:
+        """Encuentra los nodos hoja adyacentes (N, S, E, O)."""
+        mid_y, mid_x = node.y + node.h // 2, node.x + node.w // 2
+        points = [
+            (node.y - 1, mid_x),          # Norte
+            (node.y + node.h, mid_x),     # Sur
+            (mid_y, node.x - 1),          # Oeste
+            (mid_y, node.x + node.w)      # Este
+        ]
+        neighbors = []
+        for y, x in points:
+            n = self._get_leaf_at(y, x)
+            if n: neighbors.append(n)
+        return neighbors
 
     def _collect_leaves_no_data(self, node: QuadtreeNode, acc: List[QuadtreeNode]):
         """Auxiliar rápido para balanceo."""
@@ -228,18 +235,15 @@ class QuadtreeCompressor:
         node.color_br = self._img[y1, x1].astype(np.float32)
 
     def reconstruct(self, output_shape: Tuple[int, int]) -> np.ndarray:
-        """Reconstrucción vectorizada (Igual que antes)."""
         canvas = np.zeros((output_shape[0], output_shape[1], 3), dtype=np.float32)
 
         for node in self.leaves:
             if node.color_tl is None: continue 
+            
+            # O(1) lookup
+            xv, yv = self._get_interpolation_grids(node.h, node.w)
 
-            x_range = np.linspace(0, 1, node.w).astype(np.float32)
-            y_range = np.linspace(0, 1, node.h).astype(np.float32)
-            xv, yv = np.meshgrid(x_range, y_range)
-            xv = xv[..., np.newaxis] 
-            yv = yv[..., np.newaxis]
-
+            # Vectorización pura
             top = node.color_tl * (1 - xv) + node.color_tr * xv
             bottom = node.color_bl * (1 - xv) + node.color_br * xv
             patch = top * (1 - yv) + bottom * yv
@@ -253,3 +257,25 @@ class QuadtreeCompressor:
         for node in self.leaves:
             cv2.rectangle(vis, (node.x, node.y), (node.x + node.w, node.y + node.h), (0, 255, 128), 1)
         return vis
+    def reconstruct_blocks(self, output_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Reconstrucción clásica (estilo Minecraft/JPEG).
+        Pinta todo el nodo con el color promedio de sus esquinas.
+        """
+        canvas = np.zeros((output_shape[0], output_shape[1], 3), dtype=np.uint8)
+
+        for node in self.leaves:
+            if node.color_tl is None: continue 
+
+            # Calculamos el color promedio del bloque
+            # Promedio de las 4 esquinas
+            avg_color = (node.color_tl + node.color_tr + node.color_bl + node.color_br) / 4.0
+            
+            # Pintamos el rectángulo sólido
+            # (Clip para asegurar rango 0-255 y convertir a uint8)
+            color_uint8 = np.clip(avg_color, 0, 255).astype(np.uint8)
+            
+            # Asignamos el color a toda la región del nodo
+            canvas[node.y : node.y + node.h, node.x : node.x + node.w] = color_uint8
+
+        return canvas

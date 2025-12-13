@@ -1,12 +1,13 @@
 import matplotlib
-matplotlib.use('Agg')
+# Backend sin interfaz gráfica (ideal para scripts)
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import os
 
 def plot_benchmark():
-    csv_path = "results/benchmark_results_full.csv" # Asegúrate de que este nombre sea correcto
+    csv_path = "results/benchmark_results_final.csv"
     if not os.path.exists(csv_path):
         print(f"Error: No se encuentra el CSV en {csv_path}")
         return
@@ -17,82 +18,145 @@ def plot_benchmark():
         print(f"Error leyendo el CSV: {e}")
         return
         
-    print("--- Generando 4 Gráficos Comparativos ---")
+    print("--- Generando Gráficos Finales de Tesis (Estilo Académico) ---")
     
+    # =========================================================================
+    # CONFIGURACIÓN DE ESTILOS PROFESIONALES
+    # =========================================================================
     methods = [
-        {'name': 'Ours', 'label': 'CNN-Quadtree (Propuesto)', 'fmt': 'g-s', 'lw': 2},
-        {'name': 'JPEG', 'label': 'JPEG (Standard)', 'fmt': 'r--o', 'lw': 2},
-        {'name': 'WebP', 'label': 'WebP (Modern)', 'fmt': 'b-.^', 'lw': 2}
+        # 1. TU MÉTODO (El Protagonista)
+        # Rojo sólido (#D62728), Marcador Círculo, Línea gruesa
+        {
+            'name': 'Ours (optimized)',         # Nombre en el CSV
+            'label': 'Proposed (Saliency-Guided)', # Nombre en el Gráfico (Formal)
+            'fmt': '-', 'color': '#D62728', 'marker': 'o', 'lw': 2.5, 'ms': 6
+        }, 
+        
+        # 2. EL CONTROL CIENTÍFICO (El Rival Directo)
+        # Azul (#1F77B4), Guiones, Marcador Diamante
+        {
+            'name': 'Standard QT (Interp)', 
+            'label': 'Control (Variance + Interp.)', 
+            'fmt': '--', 'color': '#1F77B4', 'marker': 'D', 'lw': 1.8, 'ms': 5
+        },
+        
+        # 3. EL BASELINE (El Clásico)
+        # Negro o Gris Oscuro (#333333), Guiones, Marcador X
+        {
+            'name': 'Standard QT', 
+            'label': 'Baseline (Standard QT)', 
+            'fmt': '--', 'color': '#333333', 'marker': 'x', 'lw': 1.5, 'ms': 5
+        }, 
+        
+        # 4. LA ABLACIÓN (Prueba interna)
+        # Magenta (#9467BD), Punteado, Marcador Triángulo
+        {
+            'name': 'Ours (Ablation-Blocks)', 
+            'label': 'Ablation (Saliency + Blocks)', 
+            'fmt': ':', 'color': '#9467BD', 'marker': '^', 'lw': 1.5, 'ms': 5
+        }, 
+        
+        # 5. ESTÁNDARES (Contexto)
+        # Naranja y Cian, Líneas dash-dot
+        {
+            'name': 'JPEG', 
+            'label': 'JPEG', 
+            'fmt': '-.', 'color': '#FF7F0E', 'marker': 'None', 'lw': 1.5, 'ms': 0
+        },
+        {
+            'name': 'WebP', 
+            'label': 'WebP', 
+            'fmt': '-.', 'color': '#17BECF', 'marker': 'None', 'lw': 1.5, 'ms': 0
+        }
     ]
 
-    # Agrupamos los datos
     grouped = {}
-    # Columnas numéricas que queremos promediar
-    metrics_to_mean = ['BPP', 'lpips', 'ssim', 'ms_ssim', 'vif']
+    metrics_to_mean = ['BPP', 'lpips', 'ssim', 'ms_ssim', 'vif', 'psnr', 'sw_ssim']
+    existing_metrics = [m for m in metrics_to_mean if m in df.columns]
 
+    # Agrupar datos
     for m in methods:
         sub = df[df['Method'] == m['name']]
         if sub.empty:
-            print(f"Advertencia: No hay datos para el método '{m['name']}'. Saltando.")
             continue
-            
-        # --- CORRECCIÓN AQUÍ ---
-        # Seleccionamos explícitamente las columnas numéricas para promediar
-        # Agrupamos por 'Param' y calculamos la media solo de las métricas
-        mean = sub.groupby('Param', as_index=False)[metrics_to_mean].mean()
-        
-        # Ordenamos por BPP para que la línea del gráfico se dibuje correctamente
-        mean = mean.sort_values('BPP')
+        mean = sub.groupby('Param', as_index=False)[existing_metrics].mean()
+        mean = mean.sort_values('BPP') 
         grouped[m['name']] = mean
 
-    # Función helper para plotear
-    def create_plot(metric_col, title, ylabel, ascending_better=True):
-        plt.figure(figsize=(10, 6))
+    # Función de ploteo mejorada
+    def create_plot(metric_col, title, ylabel, is_loss_metric=False):
+        # Tamaño académico estándar (bueno para papers/PDFs)
+        plt.figure(figsize=(8, 6))
         plot_drawn = False
         
+        max_bpp_interest = 0.0
+        
         for m in methods:
-            if m['name'] not in grouped:
-                continue
+            if m['name'] not in grouped: continue
             data = grouped[m['name']]
-            # Verificar que la métrica existe en los datos
-            if metric_col not in data.columns:
-                print(f"Advertencia: Métrica '{metric_col}' no encontrada para '{m['name']}'.")
-                continue
+            if metric_col not in data.columns: continue
                 
-            plt.plot(data['BPP'], data[metric_col], m['fmt'], label=m['label'], linewidth=m['lw'])
+            # Plot manual para mayor control de estilos
+            plt.plot(
+                data['BPP'], data[metric_col], 
+                linestyle=m['fmt'], 
+                color=m['color'], 
+                marker=m['marker'],
+                label=m['label'], 
+                linewidth=m['lw'], 
+                markersize=m['ms'], 
+                alpha=0.85
+            )
+            
+            # Rastreo para zoom
+            if m['name'] in ['JPEG', 'WebP', 'Ours (optimized)']:
+                max_bpp_interest = max(max_bpp_interest, data['BPP'].max())
+            
             plot_drawn = True
         
         if not plot_drawn:
-            print(f"No se pudo generar el gráfico para {metric_col} (faltan datos).")
             plt.close()
             return
 
-        plt.title(f'{title} vs Tasa de Bits', fontsize=14)
-        plt.xlabel('Bits Por Píxel (BPP)', fontsize=12)
-        plt.ylabel(ylabel, fontsize=12)
-        plt.grid(True, linestyle=':', alpha=0.6)
-        plt.legend(fontsize=11)
+        # --- ESTÉTICA ACADÉMICA ---
+        plt.title(title, fontsize=14, fontweight='bold', pad=15)
+        plt.xlabel('Bits Per Pixel (BPP)', fontsize=12, fontweight='bold')
+        plt.ylabel(ylabel, fontsize=12, fontweight='bold')
         
+        # Grid suave
+        plt.grid(True, which='major', linestyle='-', linewidth=0.5, alpha=0.8)
+        plt.grid(True, which='minor', linestyle=':', linewidth=0.4, alpha=0.5)
+        plt.minorticks_on()
+        
+        # Leyenda limpia
+        plt.legend(fontsize=10, loc='best', frameon=True, framealpha=0.9, edgecolor='#CCCCCC')
+        
+        # Zoom inteligente (Limitamos el eje X para ver los detalles importantes)
+        # Si JPEG llega hasta 1.5, mostramos hasta 1.8. Si tu método llega a 1.2, mostramos hasta 1.5.
+        limit_x = max(1.5, max_bpp_interest * 1.1)
+        # Tope máximo razonable (más allá de 3 BPP no es compresión útil)
+        limit_x = min(limit_x, 3.5) 
+        plt.xlim(0, limit_x)
+
         # Guardar
-        filename = f"results/curve_{metric_col}.png"
-        # Asegurar que el directorio results existe
-        os.makedirs("results", exist_ok=True)
-        plt.savefig(filename, dpi=300)
-        print(f"Gráfico guardado: {filename}")
+        os.makedirs("results/plots", exist_ok=True)
+        filename = f"results/plots/RD_Curve_{metric_col}.png"
+        plt.tight_layout()
+        plt.savefig(filename, dpi=300) # Alta resolución
+        print(f"📈 Gráfico Académico generado: {filename}")
         plt.close()
 
-    # --- Generar los 4 Gráficos ---
-    # Verificamos que las columnas existan en el DF original antes de intentar plotear
-    available_metrics = df.columns.tolist()
-    
-    if 'lpips' in available_metrics:
-        create_plot('lpips', 'Calidad Perceptual (LPIPS)', 'LPIPS [Menor es mejor]', ascending_better=True)
-    if 'ssim' in available_metrics:
-        create_plot('ssim', 'Similitud Estructural (SSIM)', 'SSIM [Mayor es mejor]', ascending_better=False)
-    if 'ms_ssim' in available_metrics:
-        create_plot('ms_ssim', 'Similitud Multiescala (MS-SSIM)', 'MS-SSIM [Mayor es mejor]', ascending_better=False)
-    if 'vif' in available_metrics:
-        create_plot('vif', 'Fidelidad de Info. Visual (VIF)', 'VIF [Mayor es mejor]', ascending_better=False)
+    # Generar gráficos
+    if 'psnr' in existing_metrics:
+        create_plot('psnr', 'Relación Señal-Ruido (PSNR)', 'PSNR (dB) [Mayor es mejor] ⬆')
+    if 'ssim' in existing_metrics:
+        create_plot('ssim', 'Similitud Estructural (SSIM)', 'SSIM [Mayor es mejor] ⬆')
+    if 'lpips' in existing_metrics:
+        create_plot('lpips', 'Calidad Perceptual (LPIPS)', 'LPIPS [Menor es mejor] ⬇', is_loss_metric=True)
+    if 'ms_ssim' in existing_metrics:
+        create_plot('ms_ssim', 'Similitud Multiescala (MS-SSIM)', 'MS-SSIM [Mayor es mejor] ⬆')
+    if 'sw_ssim' in existing_metrics:
+        create_plot('sw_ssim', 'SSIM Ponderado por Saliencia (SW-SSIM)', 'SW-SSIM [Mayor es mejor] ⬆')
 
 if __name__ == "__main__":
     plot_benchmark()
