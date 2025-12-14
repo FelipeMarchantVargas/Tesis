@@ -69,8 +69,14 @@ class QuadtreeCompressor:
             self._grid_cache[key] = (xv[..., np.newaxis], yv[..., np.newaxis])
         return self._grid_cache[key]
 
-    def compress(self, image_rgb: np.ndarray, saliency_map: np.ndarray, threshold: float, alpha: float):
-        """Flujo principal: Construcción -> Balanceo -> Captura de Datos."""
+    def compress(self, image_rgb: np.ndarray, saliency_map: np.ndarray, threshold: float, alpha: float, lam: float = 10.0, beta: float = 2.0):
+        """
+        Flujo Híbrido: Top-Down (CNN) + Bottom-Up (RDO Saliency).
+        
+        Nuevos Params:
+            lam: Lambda para RDO (Controla bitrate final).
+            beta: Peso de la saliencia en RDO (Protección de tesis).
+        """
         self._img = image_rgb
         gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
         self._integral_img = IntegralImageWrapper(gray)
@@ -81,20 +87,28 @@ class QuadtreeCompressor:
         h, w = image_rgb.shape[:2]
         self.root = QuadtreeNode(0, 0, h, w, 0)
         
-        # 1. División Inicial Guiada por Semántica
-        print("[Quadtree] Iniciando división recursiva...")
-        self._recursive_split(self.root, threshold, alpha)
+        print("[Quadtree] 1. División Top-Down (Guiada por CNN)...")
+        # Usamos un umbral inicial RELAJADO (más bajo) para sobre-segmentar un poco
+        # y dejar que el RDO tome la decisión final de limpieza.
+        initial_threshold = threshold * 0.8 
+        self._recursive_split(self.root, initial_threshold, alpha)
 
-        # 2. Balanceo del Árbol (Restricted Quadtree)
-        print("[Quadtree] Aplicando balanceo 2:1...")
+        print("[Quadtree] 2. Balanceo Geométrico...")
         self.balance_tree()
 
-        # 3. Finalización: Recolectar hojas finales y extraer colores
-        print("[Quadtree] Capturando datos de color...")
-        self.leaves = []
-        self._collect_leaves_recursive(self.root)
+        # AQUÍ ESTÁ LA MAGIA DE TU TESIS
+        print(f"[Quadtree] 3. Optimización RDO (Lambda={lam}, Saliencia={beta})...")
+        # Primero aseguramos que todos los nodos tengan datos para calcular distorsión
+        # (Aunque _prune lo calcula on-the-fly, es bueno tener la estructura lista)
+        self.leaves = [] 
+        # Nota: No necesitamos collect_leaves aquí porque prune recorre desde root,
+        # pero RDO necesita leer píxeles, self._img ya está seteado.
         
-        # Limpieza
+        self.prune_with_saliency_rdo(lam=lam, beta=beta)
+
+        print(f"[Quadtree] Finalizado. Hojas finales: {len(self.leaves)}")
+        
+        # Limpieza de referencias pesadas
         self._img = None
         self._integral_img = None
         self._integral_saliency = None
@@ -234,23 +248,152 @@ class QuadtreeCompressor:
         node.color_bl = self._img[y1, x0].astype(np.float32)
         node.color_br = self._img[y1, x1].astype(np.float32)
 
-    def reconstruct(self, output_shape: Tuple[int, int]) -> np.ndarray:
-        canvas = np.zeros((output_shape[0], output_shape[1], 3), dtype=np.float32)
-
-        for node in self.leaves:
-            if node.color_tl is None: continue 
-            
-            # O(1) lookup
-            xv, yv = self._get_interpolation_grids(node.h, node.w)
-
-            # Vectorización pura
-            top = node.color_tl * (1 - xv) + node.color_tr * xv
-            bottom = node.color_bl * (1 - xv) + node.color_br * xv
-            patch = top * (1 - yv) + bottom * yv
-            
-            canvas[node.y : node.y + node.h, node.x : node.x + node.w] = patch
-
+    def reconstruct(self, node: QuadtreeNode) -> np.ndarray:
+        """
+        Reconstruye la imagen usando Interpolación Bilineal desde un nodo dado.
+        Toma las dimensiones directamente del nodo raíz.
+        """
+        h, w = node.h, node.w
+        canvas = np.zeros((h, w, 3), dtype=np.float32)
+        
+        # Llamamos al helper recursivo
+        self._reconstruct_recursive_interpolated(node, canvas)
+        
         return np.clip(canvas, 0, 255).astype(np.uint8)
+
+    def _reconstruct_recursive_interpolated(self, node, canvas):
+        """Recorre el árbol y pinta las hojas usando interpolación."""
+        if not node.is_leaf:
+            for child in node.children:
+                self._reconstruct_recursive_interpolated(child, canvas)
+        else:
+            # --- Lógica de Pintado de Hoja (Interpolación) ---
+            y, x, h, w = node.y, node.x, node.h, node.w
+            
+            # 1. Obtener colores (asegurando que no sean None)
+            c_tl = node.color_tl if node.color_tl is not None else np.zeros(3)
+            c_tr = node.color_tr if node.color_tr is not None else np.zeros(3)
+            c_bl = node.color_bl if node.color_bl is not None else np.zeros(3)
+            c_br = node.color_br if node.color_br is not None else np.zeros(3)
+
+            # 2. Obtener mallas de interpolación (usando tu cache existente)
+            xv, yv = self._get_interpolation_grids(h, w)
+            
+            # 3. Calcular gradiente bilineal
+            top = c_tl * (1 - xv) + c_tr * xv
+            bottom = c_bl * (1 - xv) + c_br * xv
+            block = top * (1 - yv) + bottom * yv
+            
+            # 4. Pintar en el canvas
+            canvas[y:y+h, x:x+w] = block
+    # --- MÉTODOS DE OPTIMIZACIÓN RDO (SALIENCY-AWARE) ---
+
+    def prune_with_saliency_rdo(self, lam: float, beta: float = 1.0):
+        """
+        Poda el árbol usando optimización Lagrangiana ponderada por Saliencia.
+        Objetivo: J = (Distortion * Importance) + (Lambda * Rate)
+        
+        Args:
+            lam (float): Penalización por bits (Lambda). Mayor = Más compresión.
+                         Rango sugerido: 1.0 a 50.0.
+            beta (float): Peso de la tesis. Controla cuánto protege la saliencia a un bloque.
+                          0.0 = RDO estándar (ignora saliencia).
+                          1.0 = Saliencia normal.
+                          >1.0 = Protección agresiva de zonas salientes.
+        """
+        if self.root is None: return
+
+        print(f"[RDO] Optimizando estructura (Lambda={lam}, Beta={beta})...")
+        self._prune_saliency_recursive(self.root, lam, beta)
+        
+        # Actualizar la lista oficial de hojas después de la poda
+        self.leaves = []
+        self._collect_leaves_recursive(self.root)
+
+    def _prune_saliency_recursive(self, node: QuadtreeNode, lam: float, beta: float) -> float:
+        """Retorna el costo mínimo (J) del subárbol."""
+        
+        # 1. Costo de Bit Rate (Estimación para modo 'optimized')
+        # - Nodo Hoja: 1 bit estructura + 48 bits color (6 bytes) = 49 bits
+        # - Nodo Split: 1 bit estructura
+        r_leaf = 49.0
+        r_split = 1.0
+
+        # 2. Factor de Importancia (Tu Tesis)
+        # Obtenemos la saliencia promedio del bloque en O(1)
+        mean_sal, _ = self._integral_saliency.get_stats(node.y, node.x, node.h, node.w)
+        norm_sal = mean_sal / 255.0  # [0.0 - 1.0]
+        
+        # Si beta=0, weight=1 (RDO clásico). Si beta=1 y saliencia=1, weight=2 (El error duele el doble).
+        importance_weight = 1.0 + (beta * norm_sal)
+
+        # 3. Calcular Costo de ser Hoja (J_leaf)
+        # Calculamos el error real (SSD) de interpolar este bloque
+        distortion = self._calculate_distortion(node)
+        
+        # Costo Hoja = (Error * Importancia) + (Lambda * Bits)
+        j_leaf = (distortion * importance_weight) + (lam * r_leaf)
+
+        if node.is_leaf:
+            return j_leaf
+
+        # 4. Calcular Costo de ser Split (J_split)
+        # Costo Split = 1 bit + Suma de costos óptimos de los hijos
+        j_children = 0.0
+        for child in node.children:
+            j_children += self._prune_saliency_recursive(child, lam, beta)
+            
+        j_split = r_split * lam + j_children # El bit del split también se multiplica por lambda? No, lambda multiplica al Rate total.
+        # Corrección fórmula lagrangiana estándar: J = D + lambda * R
+        # R_split_total = 1 (flag) + bits_hijos
+        # Entonces: J_split = (Sum_D_hijos * Importancia) + lambda * (1 + Sum_R_hijos)
+        # Simplificando la recursión: la función retorna J, que ya incluye lambda*R.
+        # Solo sumamos el costo del bit de estructura actual:
+        j_split = (lam * 1.0) + j_children
+
+        # 5. La Decisión (Poda)
+        if j_leaf <= j_split:
+            # Es "más barato" (o más eficiente) ser hoja. Podamos.
+            node.children = [] 
+            # IMPORTANTE: Al convertir en hoja, debemos asegurar que tenga datos de color
+            if node.color_tl is None:
+                self._capture_leaf_data(node)
+            return j_leaf
+        else:
+            # Vale la pena mantener la división
+            return j_split
+
+    def _calculate_distortion(self, node: QuadtreeNode) -> float:
+        """Calcula el Error Cuadrático (SSD) entre la imagen original y la interpolación."""
+        y, x, h, w = node.y, node.x, node.h, node.w
+        
+        # Extraer patch original
+        original = self._img[y:y+h, x:x+w].astype(np.float32)
+
+        # Simular interpolación (usando esquinas reales)
+        # Nota: Usamos las esquinas de la imagen original para simular el mejor caso de reconstrucción
+        h_img, w_img = self._img.shape[:2]
+        
+        # Coordenadas seguras
+        y1, x1 = min(y + h - 1, h_img - 1), min(x + w - 1, w_img - 1)
+        
+        c_tl = self._img[y, x].astype(np.float32)
+        c_tr = self._img[y, x1].astype(np.float32)
+        c_bl = self._img[y1, x].astype(np.float32)
+        c_br = self._img[y1, x1].astype(np.float32)
+
+        # Obtener grids cacheados
+        xv, yv = self._get_interpolation_grids(h, w)
+        
+        # Interpolar
+        top = c_tl * (1 - xv) + c_tr * xv
+        bottom = c_bl * (1 - xv) + c_br * xv
+        reconstructed = top * (1 - yv) + bottom * yv
+        
+        # Calcular SSD (Sum of Squared Differences)
+        diff = original - reconstructed
+        ssd = np.sum(diff ** 2)
+        return ssd
     
     def visualize_structure(self, image_shape: Tuple[int, int]) -> np.ndarray:
         vis = np.zeros((image_shape[0], image_shape[1], 3), dtype=np.uint8)

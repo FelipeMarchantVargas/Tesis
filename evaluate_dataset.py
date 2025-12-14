@@ -17,202 +17,160 @@ def evaluate():
     output_csv = "results/benchmark_results_final.csv" 
     model_path = "models/u2net.pth"
     
-    # 1. Parámetros Científicos (Optimizados con Bayes/Optuna)
-    # Alpha controla qué tanto caso le hacemos a la CNN.
-    # El valor 4.7557 indica una fuerte dependencia de la atención visual.
+    # PARAMETROS CIENTÍFICOS
     ALPHA_OPT = 4.7557 
     
-    # 2. Barrido de Thresholds (Curva Rate-Distortion)
-    # Empezamos en tu óptimo (10) y subimos para generar puntos de mayor compresión.
-    # Escala progresiva para cubrir varios rangos de bitrate.
-    qt_thresholds = [10, 15, 20, 30, 45, 70, 110, 150] 
+    # NUEVO: Barrido de Lambdas para RDO (Rate-Distortion Optimization)
+    # Valores bajos (1.0) = Alta Calidad / Poco peso a los bits.
+    # Valores altos (150.0) = Alta Compresión / Ahorrar bits es prioridad.
+    rdo_lambdas = [1, 5, 10, 20, 40, 70, 110, 150]
+    
+    # Umbral inicial FIJO y BAJO.
+    # Queremos sobre-segmentar al inicio para que el RDO tenga libertad de podar óptimamente.
+    FIXED_LOW_TH = 5 
     
     # Calidades de referencia estándar
-    jpeg_qualities = [5, 10, 20, 30, 50, 70, 80, 90]
-    webp_qualities = [5, 10, 20, 30, 50, 70, 80, 90]
+    jpeg_qualities = [10, 20, 40, 60, 80, 95]
+    webp_qualities = [10, 20, 40, 60, 80, 95]
 
-    print(f"--- Iniciando Benchmark Final ---")
-    print(f"Alpha Óptimo: {ALPHA_OPT}")
-    print(f"Thresholds: {qt_thresholds}")
-    
-    # Inicializar Motores
-    metrics_engine = QualityMetrics()
+    # Inicializar Modelos
     saliency_detector = SaliencyDetector(weights_path=model_path)
+    metrics = QualityMetrics()
     codec = QuadtreeCodec()
     
-    results = []
-    images = sorted(list(dataset_path.glob("*.png")))
-    
-    if not images:
-        print("Error: No se encontraron imágenes en data/kodak")
+    # Obtener imágenes
+    if not dataset_path.exists():
+        print(f"Error: No se encuentra {dataset_path}")
         return
+        
+    images = sorted(list(dataset_path.glob("*.png")))
+    results = []
 
-    os.makedirs("results", exist_ok=True)
+    print(f"Iniciando evaluación en {len(images)} imágenes...")
+    print(f"Modo RDO Activo. Variando Lambda: {rdo_lambdas}")
 
     for img_path in images:
-        print(f"\nProcesando {img_path.name}...")
-        img_bgr = cv2.imread(str(img_path))
-        if img_bgr is None: continue
-
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        print(f"\nProcesando: {img_path.name}")
+        
+        # Cargar Imagen
+        img_rgb = cv2.imread(str(img_path))
+        img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB)
         h, w = img_rgb.shape[:2]
-        pixels = h * w
         
-        # Mapa de Saliencia (Se calcula una sola vez por imagen)
+        # Generar Mapa de Saliencia (Una vez por imagen)
         smap = saliency_detector.get_saliency_map(img_rgb)
-
-        # =====================================================
-        # 1. TU MÉTODO (Propuesto: CNN + Interpolación)
-        # =====================================================
-        for th in qt_thresholds:
-            start_t = time.time()
-            
-            compressor = QuadtreeCompressor(min_block_size=4, max_depth=10)
-            # AQUÍ ESTABA EL ERROR: Pasamos img_rgb y smap explícitamente
-            compressor.compress(img_rgb, smap, threshold=th, alpha=ALPHA_OPT)
-            
-            enc_time = time.time() - start_t
-            
-            # Peso Real: Usamos 'optimized' pora baja bpp con buena calidad
-            compressed_bytes = codec.compress(compressor.root, (h, w), mode='optimized')
-            bpp = (len(compressed_bytes) * 8) / pixels
-            
-            # Reconstrucción: Suave (Interpolada)
-            rec = compressor.reconstruct((h, w))
-            
-            scores = metrics_engine.calculate_all(img_rgb, rec, saliency_map=smap)
-            results.append({
-                "Image": img_path.name, 
-                "Method": "Ours (optimized)", 
-                "Param": th, 
-                "BPP": bpp, 
-                "Time_s": enc_time,
-                **scores
-            })
-            print(f"  [Ours Th={th}] BPP: {bpp:.3f} | LPIPS: {scores['lpips']:.4f}")
-
-        # =====================================================
-        # 2. STANDARD QUADTREE (Baseline: Sin IA + Bloques)
-        # =====================================================
-        for th in qt_thresholds:
-            start_t = time.time()
-            
-            compressor = QuadtreeCompressor(min_block_size=4, max_depth=10)
-            # Alpha = 0.0 apaga la influencia de la CNN (Saliencia no afecta el umbral)
-            compressor.compress(img_rgb, smap, threshold=th, alpha=0.0)
-            
-            enc_time = time.time() - start_t
-            
-            # Peso Real: Usamos 'flat' porque un QT estándar guarda 1 color/hoja
-            compressed_bytes = codec.compress(compressor.root, (h, w), mode='flat')
-            bpp = (len(compressed_bytes) * 8) / pixels
-            
-            # Reconstrucción: Bloques (Minecraft style)
-            rec = compressor.reconstruct_blocks((h, w))
-            
-            scores = metrics_engine.calculate_all(img_rgb, rec, saliency_map=smap)
-            results.append({
-                "Image": img_path.name, 
-                "Method": "Standard QT", 
-                "Param": th, 
-                "BPP": bpp, 
-                "Time_s": enc_time,
-                **scores
-            })
         
-        # =====================================================
-        # 2.5. STANDARD QT + INTERPOLACIÓN (El "Control" Científico)
-        # =====================================================
-        # Hipótesis: ¿La interpolación salva al Standard QT? 
-        # Si tu método (IA) le gana a este, pruebas que la Saliencia es vital.
-        for th in qt_thresholds:
-            # Usamos alpha=0.0 (Varianza, sin IA)
-            compressor = QuadtreeCompressor(min_block_size=4, max_depth=10)
-            compressor.compress(img_rgb, smap, threshold=th, alpha=0.0)
+        # --- 1. OUR METHOD (Saliency RDO) ---
+        # Tu Tesis: Usa RDO con protección de Saliencia (beta=2.0)
+        compressor = QuadtreeCompressor(min_block_size=4, max_depth=12)
+        
+        for lam in rdo_lambdas:
+            start_time = time.time()
             
-            # IMPORTANTE: Usamos mode='gradient' porque para interpolar necesitamos 4 colores.
-            # Esto pesará más (12 bytes/hoja), igual que tu método propuesto.
+            # Compresión: Threshold bajo, Beta activado (2.0), Lambda variable
+            compressor.compress(img_rgb, smap, threshold=FIXED_LOW_TH, alpha=ALPHA_OPT, lam=lam, beta=2.0)
+            
+            # Codificación
             compressed_bytes = codec.compress(compressor.root, (h, w), mode='optimized')
-            bpp = (len(compressed_bytes) * 8) / pixels
+            bpp = len(compressed_bytes) * 8 / (h * w)
+            t_enc = time.time() - start_time
             
-            # Reconstrucción: SUAVE (Interpolada)
-            rec = compressor.reconstruct((h, w))
+            # Reconstrucción y Métricas
+            # Reconstrucción y Métricas
+            rec_root, _ = codec.decompress(compressed_bytes) # 1. Captura la forma (h, w)
+            rec_img = compressor.reconstruct(rec_root)    # 2. Pásala como primer argumento
             
-            scores = metrics_engine.calculate_all(img_rgb, rec, saliency_map=smap)
-            results.append({
-                "Image": img_path.name, 
-                "Method": "Standard QT (Interp)", # Nombre clave
-                "Param": th, 
-                "BPP": bpp, 
-                "Time_s": 0,
-                **scores
-            })
+            # --- DEBUG: GUARDAR IMAGEN ---
+            if lam == 1: # Solo guardar la primera para no llenar el disco
+                debug_path = f"debug_reconstruct_{lam}.png"
+                # Convertir a BGR para OpenCV
+                cv2.imwrite(debug_path, cv2.cvtColor(rec_img, cv2.COLOR_RGB2BGR))
+                print(f"Imagen de debug guardada en: {debug_path}")
+            # -----------------------------
 
-        # =====================================================
-        # 3. ABLACIÓN (Tu Método pero visualizado como Bloques)
-        # =====================================================
-        # Esto sirve para demostrar cuánto ganamos solo por interpolar
-        for th in qt_thresholds:
-            compressor = QuadtreeCompressor(min_block_size=4, max_depth=10)
-            compressor.compress(img_rgb, smap, threshold=th, alpha=ALPHA_OPT) # Con IA
+            m = metrics.calculate_all(img_rgb, rec_img)
             
-            # Si reconstruimos bloques, guardamos como 'flat' para ser justos en BPP vs Standard
-            compressed_bytes = codec.compress(compressor.root, (h, w), mode='flat')
-            bpp = (len(compressed_bytes) * 8) / pixels
-            
-            rec = compressor.reconstruct_blocks((h, w)) # Visualización Bloques
-            
-            scores = metrics_engine.calculate_all(img_rgb, rec, saliency_map=smap)
-            results.append({
-                "Image": img_path.name, 
-                "Method": "Ours (Ablation-Blocks)", 
-                "Param": th, 
-                "BPP": bpp, 
-                "Time_s": 0, # Ya medido arriba
-                **scores
-            })
+            res = {
+                "Image": img_path.name,
+                "Method": "Ours (Saliency RDO)", # Nombre actualizado
+                "Param": lam, # Ahora el parámetro es Lambda
+                "BPP": bpp,
+                "Time_s": t_enc,
+                **m
+            }
+            results.append(res)
+            print(f"  [Ours RDO] Lam={lam}: BPP={bpp:.3f}, SSIM={m['ssim']:.3f}")
 
-        # =====================================================
-        # 4 & 5. COMPETENCIA INDUSTRIAL (JPEG / WebP)
-        # =====================================================
+        # --- 2. BASELINE (Standard RDO) ---
+        # Control: Usa el mismo algoritmo pero SIN mirar la saliencia (beta=0.0)
+        # Esto demuestra que tu mejora viene de la saliencia y no solo del RDO.
+        for lam in rdo_lambdas:
+            start_time = time.time()
+            
+            # Compresión: Threshold bajo, Beta apagado (0.0)
+            compressor.compress(img_rgb, smap, threshold=FIXED_LOW_TH, alpha=0.0, lam=lam, beta=0.0)
+            
+            compressed_bytes = codec.compress(compressor.root, (h, w), mode='optimized')
+            bpp = len(compressed_bytes) * 8 / (h * w)
+            t_enc = time.time() - start_time
+            
+            rec_root, _ = codec.decompress(compressed_bytes)
+            rec_img = compressor.reconstruct(rec_root)
+            
+            m = metrics.calculate_all(img_rgb, rec_img)
+            
+            res = {
+                "Image": img_path.name,
+                "Method": "Standard RDO (No Saliency)",
+                "Param": lam,
+                "BPP": bpp,
+                "Time_s": t_enc,
+                **m
+            }
+            results.append(res)
+
+        # --- 3. JPEG (Referencia) ---
         for q in jpeg_qualities:
-            temp = "temp_eval.jpg"
-            start_t = time.time()
-            cv2.imwrite(temp, img_bgr, [cv2.IMWRITE_JPEG_QUALITY, q])
-            enc_time = time.time() - start_t
+            start_time = time.time()
+            _, enc = cv2.imencode('.jpg', cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, q])
+            bpp = len(enc) * 8 / (h * w)
+            t_enc = time.time() - start_time
             
-            bpp = (os.path.getsize(temp) * 8) / pixels
-            rec = cv2.cvtColor(cv2.imread(temp), cv2.COLOR_BGR2RGB)
+            dec = cv2.imdecode(enc, cv2.IMREAD_COLOR)
+            dec = cv2.cvtColor(dec, cv2.COLOR_BGR2RGB)
             
-            scores = metrics_engine.calculate_all(img_rgb, rec, saliency_map=smap)
+            m = metrics.calculate_all(img_rgb, dec)
             results.append({
-                "Image": img_path.name, "Method": "JPEG", "Param": q, 
-                "BPP": bpp, "Time_s": enc_time, **scores
+                "Image": img_path.name,
+                "Method": "JPEG",
+                "Param": q,
+                "BPP": bpp,
+                "Time_s": t_enc,
+                **m
             })
 
+        # --- 4. WebP (Referencia) ---
         for q in webp_qualities:
-            temp = "temp_eval.webp"
-            start_t = time.time()
-            cv2.imwrite(temp, img_bgr, [cv2.IMWRITE_WEBP_QUALITY, q])
-            enc_time = time.time() - start_t
-            
-            bpp = (os.path.getsize(temp) * 8) / pixels
-            rec = cv2.cvtColor(cv2.imread(temp), cv2.COLOR_BGR2RGB)
-            
-            scores = metrics_engine.calculate_all(img_rgb, rec)
+            start_time = time.time()
+            _, enc = cv2.imencode('.webp', cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_WEBP_QUALITY, q])
+            bpp = len(enc) * 8 / (h * w)
+            t_enc = time.time() - start_time
+            dec = cv2.imdecode(enc, cv2.IMREAD_COLOR)
+            dec = cv2.cvtColor(dec, cv2.COLOR_BGR2RGB)
+            m = metrics.calculate_all(img_rgb, dec)
             results.append({
-                "Image": img_path.name, "Method": "WebP", "Param": q, 
-                "BPP": bpp, "Time_s": enc_time, **scores
+                "Image": img_path.name,
+                "Method": "WebP",
+                "Param": q,
+                "BPP": bpp,
+                "Time_s": t_enc,
+                **m
             })
 
-    # Limpieza
-    if os.path.exists("temp_eval.jpg"): os.remove("temp_eval.jpg")
-    if os.path.exists("temp_eval.webp"): os.remove("temp_eval.webp")
-
-    # Guardar Resultados
+    # Guardar CSV final
     df = pd.DataFrame(results)
     df.to_csv(output_csv, index=False)
-    print(f"\n✅ Benchmark finalizado. Resultados en {output_csv}")
+    print(f"\nEvaluación completa. Resultados guardados en {output_csv}")
 
 if __name__ == "__main__":
     evaluate()
