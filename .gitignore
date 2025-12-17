@@ -3,7 +3,6 @@ venv/
 LICENSE
 README.md
 pip_temp
-results
 u2net.pth
 models/
 src/__pycache__

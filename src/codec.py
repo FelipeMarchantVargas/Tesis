@@ -5,107 +5,82 @@ from src.quadtree import QuadtreeNode
 
 class QuadtreeCodec:
     """
-    Codificador de Entropía Avanzado para Quadtrees.
-    
-    Características SOTA (State-of-the-Art):
-    1. Bit-Packed Structure: La topología del árbol se guarda como un stream de bits.
-    2. Stream Separation: Separa topología y color para maximizar la eficiencia DEFLATE.
-    3. DPCM (Differential Pulse Code Modulation): Codifica diferencias relativas en lugar de absolutas.
-    4. Chroma Subsampling (4:2:0): En modo 'optimized', reduce la resolución de color manteniendo el brillo.
+    Codec Multi-Modo (Multi-Mode Prediction RDO).
+    Estructura Bitstream:
+    - Split Node: 0
+    - Leaf Node: 1 + [Mode Bit]
+        - Mode 0 (Flat): Data (1 Y + CbCr)
+        - Mode 1 (Interp): Data (4 Y + CbCr)
     """
 
     def compress(self, root: QuadtreeNode, shape: tuple, mode: str = 'optimized') -> bytes:
-        """
-        Comprime el árbol usando Bit Packing + DPCM + Zlib.
-        """
         h, w = shape
         
-        # 1. Inicializar Predictores DPCM (Estado inicial)
-        # Se reinician para cada imagen.
-        self.prev_dc = np.array([0.0, 0.0, 0.0], dtype=np.float32) # Para modos RGB
-        self.prev_y  = 0.0   # Para Luma
-        self.prev_cb = 128.0 # Para Chroma Blue (gris neutro)
-        self.prev_cr = 128.0 # Para Chroma Red (gris neutro)
+        # Reset Predictors (Closed-Loop)
+        self.prev_y  = 0.0
+        self.prev_cb = 128.0
+        self.prev_cr = 128.0
 
-        # 2. Configuración de Header
-        mode_map = {'flat': 0, 'gradient': 1, 'optimized': 2}
-        mode_byte = mode_map.get(mode, 2)
+        structure_bits = []
+        color_data = bytearray()
         
-        # 3. Recorrido del Árbol (Separando bits de estructura y bytes de color)
-        structure_bits = []      # Lista temporal de 0s y 1s
-        color_data = bytearray() # Buffer de bytes para los colores (DPCM aplicado)
+        # Encode
+        self._encode_recursive(root, structure_bits, color_data)
         
-        self._encode_recursive(root, structure_bits, color_data, mode)
-        
-        # 4. Bit Packing (Convertir lista de bits a bytes reales)
         packed_structure = self._pack_bits(structure_bits)
         
-        # 5. Ensamblaje del Payload Binario
-        # Header: [Alto (2B)] [Ancho (2B)] [Modo (1B)]
-        header = struct.pack('>HHB', h, w, mode_byte)
-        
-        # Tamaño de la estructura (4 bytes) - Necesario para el decodificador
+        # Payload
+        header = struct.pack('>HHB', h, w, 2) # Mode 2 = Optimized Multi-Mode
         struct_len = struct.pack('>I', len(packed_structure))
         
-        # Payload: [Header] + [LenStruct] + [StructureBytes] + [ColorBytes]
         full_payload = header + struct_len + packed_structure + color_data
-        
-        # 6. Compresión Final DEFLATE (Nivel 9 - Máximo)
-        # Aquí es donde DPCM brilla: zlib comprime muy bien las diferencias pequeñas.
         return zlib.compress(full_payload, level=9)
 
     def decompress(self, compressed_data: bytes):
-        """Descomprime y reconstruye el Quadtree."""
         try:
             full_payload = zlib.decompress(compressed_data)
-        except zlib.error:
-            raise ValueError("Datos corruptos o formato zlib inválido.")
+        except:
+            raise ValueError("Zlib Error")
 
-        # 1. Inicializar Predictores DPCM para decodificación
-        self.prev_dc = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        # Reset Predictors
         self.prev_y  = 0.0
         self.prev_cb = 128.0
         self.prev_cr = 128.0
 
         ptr = 0
-        
-        # 2. Leer Header
-        h, w, mode_byte = struct.unpack('>HHB', full_payload[ptr:ptr+5])
+        h, w, _ = struct.unpack('>HHB', full_payload[ptr:ptr+5])
         ptr += 5
         
-        modes = {0: 'flat', 1: 'gradient', 2: 'optimized'}
-        mode = modes.get(mode_byte, 'optimized')
-        
-        # 3. Leer longitud de estructura
         struct_len = struct.unpack('>I', full_payload[ptr:ptr+4])[0]
         ptr += 4
         
-        # 4. Separar Streams
         packed_structure = full_payload[ptr : ptr + struct_len]
         ptr += struct_len
-        raw_colors = full_payload[ptr:] # El resto es el stream de colores DPCM
+        raw_colors = full_payload[ptr:]
         
-        # 5. Crear Iteradores
         bit_stream = self._bit_generator(packed_structure)
         color_stream = iter(raw_colors)
         
-        # 6. Reconstrucción Recursiva
-        root = self._decode_recursive(bit_stream, color_stream, 0, 0, h, w, 0, mode)
-        
+        root = self._decode_recursive(bit_stream, color_stream, 0, 0, h, w, 0)
         return root, (h, w)
 
-    # --- Lógica de Recorrido (Estructura) ---
-
-    def _encode_recursive(self, node: QuadtreeNode, bits: list, colors: bytearray, mode: str):
+    def _encode_recursive(self, node: QuadtreeNode, bits: list, colors: bytearray):
         if not node.is_leaf:
-            bits.append(0) # Flag: Split (1 bit)
+            bits.append(0) # Flag: Split
             for child in node.children:
-                self._encode_recursive(child, bits, colors, mode)
+                self._encode_recursive(child, bits, colors)
         else:
-            bits.append(1) # Flag: Leaf (1 bit)
-            self._write_colors_dpcm(node, colors, mode)
+            bits.append(1) # Flag: Leaf
+            
+            # --- NUEVO: Bit de Modo ---
+            if node.mode == 'flat':
+                bits.append(0) # Mode 0 = Flat
+                self._write_flat_dpcm(node, colors)
+            else:
+                bits.append(1) # Mode 1 = Interp
+                self._write_interp_dpcm(node, colors)
 
-    def _decode_recursive(self, bit_stream, color_stream, y, x, h, w, depth, mode):
+    def _decode_recursive(self, bit_stream, color_stream, y, x, h, w, depth):
         try:
             flag = next(bit_stream)
         except StopIteration:
@@ -116,149 +91,135 @@ class QuadtreeCodec:
         if flag == 0: # Split
             half_h, half_w = h // 2, w // 2
             node.children = [
-                self._decode_recursive(bit_stream, color_stream, y, x, half_h, half_w, depth+1, mode),           # TL
-                self._decode_recursive(bit_stream, color_stream, y, x+half_w, half_h, w-half_w, depth+1, mode),  # TR
-                self._decode_recursive(bit_stream, color_stream, y+half_h, x, h-half_h, half_w, depth+1, mode),  # BL
-                self._decode_recursive(bit_stream, color_stream, y+half_h, x+half_w, h-half_h, w-half_w, depth+1, mode) # BR
+                self._decode_recursive(bit_stream, color_stream, y, x, half_h, half_w, depth+1),
+                self._decode_recursive(bit_stream, color_stream, y, x+half_w, half_h, w-half_w, depth+1),
+                self._decode_recursive(bit_stream, color_stream, y+half_h, x, h-half_h, half_w, depth+1),
+                self._decode_recursive(bit_stream, color_stream, y+half_h, x+half_w, h-half_h, w-half_w, depth+1)
             ]
         else: # Leaf
-            self._read_colors_dpcm(node, color_stream, mode)
+            # Leer Bit de Modo
+            mode_bit = next(bit_stream)
+            if mode_bit == 0:
+                node.mode = 'flat'
+                self._read_flat_dpcm(node, color_stream)
+            else:
+                node.mode = 'interp'
+                self._read_interp_dpcm(node, color_stream)
             
         return node
 
-    # --- Lógica de Color con DPCM (Delta Coding) ---
+    # --- WRITERS (Closed-Loop DPCM) ---
 
-    def _write_colors_dpcm(self, node, stream: bytearray, mode: str):
-        # Obtener colores (relleno negro si es None)
+    def _write_flat_dpcm(self, node, stream):
+        # Flat: Promedio de las esquinas (o la que se tenga)
+        # Nota: El RDO calculó costo basado en un color. Usamos promedio de esquinas actuales.
         raw = [node.color_tl, node.color_tr, node.color_bl, node.color_br]
-        colors = [c if c is not None else np.zeros(3, dtype=np.float32) for c in raw]
+        # Filtrar Nones
+        valid = [c for c in raw if c is not None]
+        if not valid: avg_col = np.zeros(3)
+        else: avg_col = np.mean(valid, axis=0)
 
-        if mode == 'optimized':
-            # --- CORRECCIÓN: CLOSED-LOOP DPCM ---
-            ys, cbs, crs = [], [], []
-            for col in colors:
-                y, cb, cr = self._rgb_to_ycbcr(col)
-                ys.append(y)
-                cbs.append(cb)
-                crs.append(cr)
+        y, cb, cr = self._rgb_to_ycbcr(avg_col)
+        
+        # 1. Luma (1 valor)
+        diff = int(y - self.prev_y) % 256
+        stream.append(diff)
+        self.prev_y = (self.prev_y + diff) % 256 # Update Closed-Loop
+
+        # 2. Chroma (1 valor)
+        diff_cb = int(cb - self.prev_cb) % 256
+        diff_cr = int(cr - self.prev_cr) % 256
+        stream.append(diff_cb)
+        stream.append(diff_cr)
+        self.prev_cb = (self.prev_cb + diff_cb) % 256
+        self.prev_cr = (self.prev_cr + diff_cr) % 256
+
+    def _write_interp_dpcm(self, node, stream):
+        raw = [node.color_tl, node.color_tr, node.color_bl, node.color_br]
+        colors = [c if c is not None else np.zeros(3) for c in raw]
+        
+        ys, cbs, crs = [], [], []
+        for c in colors:
+            _y, _cb, _cr = self._rgb_to_ycbcr(c)
+            ys.append(_y); cbs.append(_cb); crs.append(_cr)
             
-            # 1. Luma (Y)
-            for val_y in ys:
-                diff = int(val_y - self.prev_y) % 256
-                stream.append(diff)
-                
-                # ¡CRÍTICO! Actualizamos el predictor con lo que ve el DECODER, no el original
-                reconstructed_val = (self.prev_y + diff) % 256
-                self.prev_y = reconstructed_val 
+        # 1. Luma (4 valores)
+        for val_y in ys:
+            diff = int(val_y - self.prev_y) % 256
+            stream.append(diff)
+            self.prev_y = (self.prev_y + diff) % 256 # Update per pixel
 
-            # 2. Chroma (CbCr)
-            avg_cb = np.mean(cbs)
-            avg_cr = np.mean(crs)
+        # 2. Chroma (Promedio, 1 valor compartido)
+        avg_cb = np.mean(cbs)
+        avg_cr = np.mean(crs)
+        
+        diff_cb = int(avg_cb - self.prev_cb) % 256
+        diff_cr = int(avg_cr - self.prev_cr) % 256
+        stream.append(diff_cb)
+        stream.append(diff_cr)
+        
+        self.prev_cb = (self.prev_cb + diff_cb) % 256
+        self.prev_cr = (self.prev_cr + diff_cr) % 256
+
+    # --- READERS ---
+
+    def _read_flat_dpcm(self, node, stream):
+        # 1. Luma
+        d_y = next(stream)
+        y = (self.prev_y + d_y) % 256
+        self.prev_y = y
+        
+        # 2. Chroma
+        d_cb = next(stream); d_cr = next(stream)
+        cb = (self.prev_cb + d_cb) % 256
+        cr = (self.prev_cr + d_cr) % 256
+        self.prev_cb, self.prev_cr = cb, cr
+        
+        # Reconstruir (Las 4 esquinas iguales)
+        col = self._ycbcr_to_rgb(y, cb, cr)
+        node.color_tl = node.color_tr = node.color_bl = node.color_br = col
+
+    def _read_interp_dpcm(self, node, stream):
+        # 1. Luma (4 valores)
+        rec_ys = []
+        for _ in range(4):
+            d_y = next(stream)
+            y = (self.prev_y + d_y) % 256
+            rec_ys.append(y)
+            self.prev_y = y
             
-            diff_cb = int(avg_cb - self.prev_cb) % 256
-            diff_cr = int(avg_cr - self.prev_cr) % 256
-            
-            stream.append(diff_cb)
-            stream.append(diff_cr)
-            
-            # ¡CRÍTICO! Actualizamos con el valor reconstruido
-            self.prev_cb = (self.prev_cb + diff_cb) % 256
-            self.prev_cr = (self.prev_cr + diff_cr) % 256
+        # 2. Chroma (1 valor)
+        d_cb = next(stream); d_cr = next(stream)
+        cb = (self.prev_cb + d_cb) % 256
+        cr = (self.prev_cr + d_cr) % 256
+        self.prev_cb, self.prev_cr = cb, cr
+        
+        # Reconstruir
+        node.color_tl = self._ycbcr_to_rgb(rec_ys[0], cb, cr)
+        node.color_tr = self._ycbcr_to_rgb(rec_ys[1], cb, cr)
+        node.color_bl = self._ycbcr_to_rgb(rec_ys[2], cb, cr)
+        node.color_br = self._ycbcr_to_rgb(rec_ys[3], cb, cr)
 
-        elif mode == 'gradient':
-            for col in colors:
-                # Convertimos a entero para asegurar consistencia
-                col_int = np.clip(col, 0, 255).astype(np.int32)
-                prev_int = np.clip(self.prev_dc, 0, 255).astype(np.int32)
-                
-                diff = (col_int - prev_int) % 256
-                stream.extend(diff.astype(np.uint8).tobytes())
-                
-                # Actualizar con reconstruido
-                reconstructed = (prev_int + diff) % 256
-                self.prev_dc = reconstructed.astype(np.float32)
-
-        elif mode == 'flat':
-            avg = np.mean(colors, axis=0)
-            avg_int = np.clip(avg, 0, 255).astype(np.int32)
-            prev_int = np.clip(self.prev_dc, 0, 255).astype(np.int32)
-            
-            diff = (avg_int - prev_int) % 256
-            stream.extend(diff.astype(np.uint8).tobytes())
-            
-            reconstructed = (prev_int + diff) % 256
-            self.prev_dc = reconstructed.astype(np.float32)
-
-    def _read_colors_dpcm(self, node, stream, mode: str):
-        def read_n(n):
-            return [next(stream) for _ in range(n)]
-
-        if mode == 'optimized':
-            # --- DECODIFICACIÓN YCbCr DPCM ---
-            # 1. Recuperar Luma (4 valores)
-            y_deltas = read_n(4)
-            rec_ys = []
-            for d in y_deltas:
-                val = (self.prev_y + d) % 256
-                rec_ys.append(val)
-                self.prev_y = val
-            
-            # 2. Recuperar Chroma (2 valores)
-            d_cb, d_cr = read_n(2)
-            cb = (self.prev_cb + d_cb) % 256
-            cr = (self.prev_cr + d_cr) % 256
-            self.prev_cb, self.prev_cr = cb, cr
-            
-            # 3. Reconstrucción Final
-            node.color_tl = self._ycbcr_to_rgb(rec_ys[0], cb, cr)
-            node.color_tr = self._ycbcr_to_rgb(rec_ys[1], cb, cr)
-            node.color_bl = self._ycbcr_to_rgb(rec_ys[2], cb, cr)
-            node.color_br = self._ycbcr_to_rgb(rec_ys[3], cb, cr)
-
-        elif mode == 'gradient':
-            rec_colors = []
-            for _ in range(4):
-                diff = np.array(read_n(3), dtype=np.float32)
-                val = (self.prev_dc + diff) % 256
-                rec_colors.append(val)
-                self.prev_dc = val
-            node.color_tl, node.color_tr, node.color_bl, node.color_br = rec_colors
-
-        elif mode == 'flat':
-            diff = np.array(read_n(3), dtype=np.float32)
-            val = (self.prev_dc + diff) % 256
-            self.prev_dc = val
-            node.color_tl = node.color_tr = node.color_bl = node.color_br = val
-
-    # --- Utilidades de Bits (Low Level Engineering) ---
-
-    def _pack_bits(self, bits: list) -> bytes:
-        """Empaqueta una lista de [0,1,1,0...] en bytes reales."""
+    # --- HELPERS LOW LEVEL ---
+    def _pack_bits(self, bits):
         byte_arr = bytearray()
-        current_byte = 0
-        bit_count = 0
-        
+        cur, cnt = 0, 0
         for b in bits:
-            if b: current_byte |= (1 << (7 - bit_count))
-            bit_count += 1
-            if bit_count == 8:
-                byte_arr.append(current_byte)
-                current_byte = 0
-                bit_count = 0
-        
-        if bit_count > 0: byte_arr.append(current_byte)
+            if b: cur |= (1 << (7 - cnt))
+            cnt += 1
+            if cnt == 8:
+                byte_arr.append(cur)
+                cur, cnt = 0, 0
+        if cnt > 0: byte_arr.append(cur)
         return bytes(byte_arr)
 
-    def _bit_generator(self, packed_bytes):
-        """Generador bit a bit."""
-        for byte in packed_bytes:
+    def _bit_generator(self, packed):
+        for b in packed:
             for i in range(7, -1, -1):
-                yield (byte >> i) & 1
+                yield (b >> i) & 1
 
-    # --- Utilidades Matemáticas ---
-
-    def _rgb_to_ycbcr(self, col):
-        r, g, b = col
+    def _rgb_to_ycbcr(self, c):
+        r, g, b = c
         y  =  0.299*r + 0.587*g + 0.114*b
         cb = 128 - 0.168736*r - 0.331264*g + 0.5*b
         cr = 128 + 0.5*r - 0.418688*g - 0.081312*b
