@@ -17,17 +17,17 @@ def run_optimization():
     DATASET_DIR = Path("data/kodak")
     MODEL_PATH = "models/u2net.pth"
     
-    # N_TRIALS: 50-100 iteraciones son suficientes.
+    # N_TRIALS: 50 iteraciones suelen ser suficientes para encontrar un buen óptimo local.
     N_TRIALS = 50
     
     # LAMBDA FIJO para la optimización.
     # Usamos un valor intermedio (ej. 40) que representa un balance típico.
-    # Optimizaremos los parámetros estructurales para que funcionen bien en este punto.
+    # Optimizaremos los parámetros estructurales para que funcionen bien en este punto de operación.
     FIXED_LAMBDA_RDO = 40.0 
     
     # Peso del BPP en la función de costo de Optuna
     # Objetivo = (1.0 - SW_SSIM) + (COSTO_BPP * BPP)
-    # Buscamos maximizar SW-SSIM manteniendo BPP bajo.
+    # Buscamos maximizar SW-SSIM manteniendo el BPP bajo control.
     COSTO_BPP_OPTUNA = 0.1 
 
     print("--- Optimizando Hiperparámetros (Threshold, Alpha, Beta) ---")
@@ -43,13 +43,12 @@ def run_optimization():
 
     # 1. Inicializar Motores
     print("Cargando modelos...")
-    # Nota: Usamos 'model_path' que es lo que usaste en evaluate_dataset.py
     saliency_detector = SaliencyDetector(weights_path=MODEL_PATH)
     metrics_engine = QualityMetrics()
     codec = QuadtreeCodec()
 
-    # 2. Cachear Dataset (Primeras 5-10 imágenes para velocidad)
-    # Usar pocas imágenes acelera mucho la búsqueda y suele generalizar bien.
+    # 2. Cachear Dataset (Primeras 8 imágenes para velocidad)
+    # Usar un subconjunto acelera la búsqueda y generaliza bien para parámetros estructurales.
     subset_paths = image_paths[:8] 
     cache_data = []
     
@@ -73,15 +72,15 @@ def run_optimization():
     def objective(trial):
         # 1. Sugerencia de Hiperparámetros (Espacio de Búsqueda)
         
-        # Threshold: Ahora que tenemos RDO, podemos permitir thresholds más bajos
-        # para sobre-segmentar y dejar que RDO pode. Rango: [2.0 - 20.0]
-        threshold = trial.suggest_float("threshold", 2.0, 20.0)
+        # Threshold: Permitimos bajar a 0.0 para que la DCT (que requiere 8x8) tenga oportunidad de activarse.
+        # Un threshold bajo fuerza la división inicial, dejando la decisión final al RDO.
+        threshold = trial.suggest_float("threshold", 0.0, 10.0)
         
-        # Alpha (Top-Down): Sensibilidad inicial. Rango [0.0 - 8.0]
+        # Alpha (Top-Down): Sensibilidad inicial a la saliencia en la etapa de split.
         alpha = trial.suggest_float("alpha", 0.0, 8.0)
         
-        # Beta (Bottom-Up): Protección de saliencia en RDO. Rango [0.0 - 10.0]
-        # Beta=0 es RDO estándar. Beta alto protege mucho.
+        # Beta (Bottom-Up): Protección de saliencia en RDO.
+        # Beta=0 es RDO estándar. Beta alto protege mucho las zonas de interés.
         beta = trial.suggest_float("beta", 0.0, 10.0)
 
         total_loss = 0.0
@@ -89,47 +88,50 @@ def run_optimization():
         for data in cache_data:
             img_rgb = data['rgb']
             smap = data['smap']
-            h, w = data['shape']
             
             # A. Compresión con los parámetros sugeridos
-            compressor = QuadtreeCompressor(min_block_size=4, max_depth=12)
+            # CRÍTICO: min_block_size=8 para habilitar DCT.
+            # Si bajamos a 4, la DCT se desactiva y optimizamos parámetros erróneos.
+            compressor = QuadtreeCompressor(min_block_size=8, max_depth=10)
+            
             try:
                 compressor.compress(
                     img_rgb, smap, 
                     threshold=threshold, 
                     alpha=alpha, 
-                    lam=FIXED_LAMBDA_RDO, # Fijamos Lambda del RDO
-                    beta=beta             # Optimizamos Beta
+                    lam=FIXED_LAMBDA_RDO, 
+                    beta=beta             
                 )
                 
                 # B. Calcular BPP Real (Multi-Mode)
-                compressed_bytes = codec.compress(compressor.root, (h, w), mode='optimized')
+                # CRÍTICO: Usar dimensiones del árbol PADDEADO (root.h, root.w).
+                # Si pasamos las dimensiones originales, el codec fallará al deserializar.
+                padded_shape = (compressor.root.h, compressor.root.w)
+                compressed_bytes = codec.compress(compressor.root, padded_shape)
+                
+                # BPP se calcula sobre los píxeles originales útiles (data['pixels'])
                 bpp = (len(compressed_bytes) * 8) / data['pixels']
                 
-                # C. Reconstrucción Directa (Desde el árbol en memoria, más rápido)
-                # Ojo: reconstruct ahora pide el nodo raíz
+                # C. Reconstrucción Directa
+                # El método reconstruct() ya maneja internamente el recorte del padding.
                 rec_img = compressor.reconstruct(compressor.root)
                 
                 # D. Calcular Métricas
-                # Pasamos smap para tener SW-SSIM correcto
+                # Pasamos smap para calcular SW-SSIM correctamente.
                 scores = metrics_engine.calculate_all(img_rgb, rec_img, saliency_map=smap)
                 
                 # E. Función de Costo para Optuna
-                # Queremos: Alto SW-SSIM (calidad en objetos) y Bajo BPP.
-                # Loss = (1 - SW_SSIM) + (k * BPP)
-                # Usamos SW-SSIM porque es tu métrica estrella.
+                # Maximizamos SW-SSIM (1 - SW-SSIM) minimizando BPP
                 metric_loss = 1.0 - scores['sw_ssim']
-                
-                # Penalización por BPP
                 rate_loss = COSTO_BPP_OPTUNA * bpp
                 
                 total_loss += (metric_loss + rate_loss)
                 
             except Exception as e:
-                # Si falla una configuración (ej. árbol inválido), penalizamos
+                # Si falla una configuración (ej. BPP explota o error numérico), penalizamos fuerte.
                 return float('inf')
 
-        # Promedio del costo en el dataset
+        # Retornamos el promedio del costo en el dataset
         return total_loss / len(cache_data)
 
     # --- EJECUCIÓN ---
@@ -145,10 +147,10 @@ def run_optimization():
     print("--- COPIA ESTOS VALORES EN evaluate_dataset.py ---")
     print(f"FIXED_LOW_TH = {study.best_params['threshold']:.4f}")
     print(f"ALPHA_OPT    = {study.best_params['alpha']:.4f}")
-    print(f"BETA_OPT     = {study.best_params['beta']:.4f}  (Usar este valor en 'beta=...' dentro del loop)")
+    print(f"BETA_OPT     = {study.best_params['beta']:.4f}")
     print("="*50)
     
-    # Guardar CSV detallado
+    # Guardar CSV detallado para análisis posterior
     os.makedirs("results", exist_ok=True)
     df = study.trials_dataframe()
     df.to_csv("results/optuna_optimization_log.csv", index=False)

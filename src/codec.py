@@ -5,218 +5,202 @@ from src.quadtree import QuadtreeNode
 
 class QuadtreeCodec:
     """
-    Codec Multi-Modo (Multi-Mode Prediction RDO).
-    Estructura Bitstream:
-    - Split Node: 0
-    - Leaf Node: 1 + [Mode Bit]
-        - Mode 0 (Flat): Data (1 Y + CbCr)
-        - Mode 1 (Interp): Data (4 Y + CbCr)
+    Codec Multi-Modo (Flat / Interp / DCT) con Cabecera de Calidad.
     """
 
-    def compress(self, root: QuadtreeNode, shape: tuple, mode: str = 'optimized') -> bytes:
+    def compress(self, root: QuadtreeNode, shape: tuple, quality_factor: int = 50) -> bytes:
         h, w = shape
         
-        # Reset Predictors (Closed-Loop)
         self.prev_y  = 0.0
         self.prev_cb = 128.0
         self.prev_cr = 128.0
+        self.prev_dc = 0
 
         structure_bits = []
-        color_data = bytearray()
+        payload_data = bytearray()
         
-        # Encode
-        self._encode_recursive(root, structure_bits, color_data)
-        
+        self._encode_recursive(root, structure_bits, payload_data)
         packed_structure = self._pack_bits(structure_bits)
         
-        # Payload
-        header = struct.pack('>HHB', h, w, 2) # Mode 2 = Optimized Multi-Mode
-        struct_len = struct.pack('>I', len(packed_structure))
+        # Header: H(2), W(2), Ver(1), Quality(1)
+        header = struct.pack('>HHBB', h, w, 3, int(quality_factor))
         
-        full_payload = header + struct_len + packed_structure + color_data
+        struct_len = struct.pack('>I', len(packed_structure))
+        full_payload = header + struct_len + packed_structure + payload_data
         return zlib.compress(full_payload, level=9)
 
     def decompress(self, compressed_data: bytes):
         try:
             full_payload = zlib.decompress(compressed_data)
         except:
-            raise ValueError("Zlib Error")
+            raise ValueError("Zlib Error.")
 
-        # Reset Predictors
         self.prev_y  = 0.0
         self.prev_cb = 128.0
         self.prev_cr = 128.0
+        self.prev_dc = 0
 
         ptr = 0
-        h, w, _ = struct.unpack('>HHB', full_payload[ptr:ptr+5])
-        ptr += 5
+        h, w, ver, quality = struct.unpack('>HHBB', full_payload[ptr:ptr+6])
+        ptr += 6
         
         struct_len = struct.unpack('>I', full_payload[ptr:ptr+4])[0]
         ptr += 4
         
         packed_structure = full_payload[ptr : ptr + struct_len]
         ptr += struct_len
-        raw_colors = full_payload[ptr:]
+        raw_data = full_payload[ptr:]
         
         bit_stream = self._bit_generator(packed_structure)
-        color_stream = iter(raw_colors)
+        self.data_ptr = 0
+        self.data_buffer = raw_data
         
-        root = self._decode_recursive(bit_stream, color_stream, 0, 0, h, w, 0)
-        return root, (h, w)
+        root = self._decode_recursive(bit_stream, y=0, x=0, h=h, w=w, depth=0)
+        
+        return root, (h, w), quality
 
-    def _encode_recursive(self, node: QuadtreeNode, bits: list, colors: bytearray):
+    def _encode_recursive(self, node: QuadtreeNode, bits: list, payload: bytearray):
         if not node.is_leaf:
-            bits.append(0) # Flag: Split
-            for child in node.children:
-                self._encode_recursive(child, bits, colors)
+            bits.append(0)
+            for child in node.children: self._encode_recursive(child, bits, payload)
         else:
-            bits.append(1) # Flag: Leaf
-            
-            # --- NUEVO: Bit de Modo ---
+            bits.append(1)
             if node.mode == 'flat':
-                bits.append(0) # Mode 0 = Flat
-                self._write_flat_dpcm(node, colors)
+                bits.append(0); bits.append(0)
+                self._write_flat_dpcm(node, payload)
+            elif node.mode == 'interp':
+                bits.append(0); bits.append(1)
+                self._write_interp_dpcm(node, payload)
+            elif node.mode == 'dct':
+                bits.append(1); bits.append(0)
+                self._write_dct_block(node, payload)
             else:
-                bits.append(1) # Mode 1 = Interp
-                self._write_interp_dpcm(node, colors)
+                bits.append(0); bits.append(0)
+                self._write_flat_dpcm(node, payload)
 
-    def _decode_recursive(self, bit_stream, color_stream, y, x, h, w, depth):
-        try:
-            flag = next(bit_stream)
-        except StopIteration:
-            return None
-
+    def _decode_recursive(self, bit_stream, y, x, h, w, depth):
+        try: flag = next(bit_stream)
+        except StopIteration: return None
         node = QuadtreeNode(y, x, h, w, depth)
-
-        if flag == 0: # Split
-            half_h, half_w = h // 2, w // 2
+        if flag == 0:
+            h2, w2 = h // 2, w // 2
             node.children = [
-                self._decode_recursive(bit_stream, color_stream, y, x, half_h, half_w, depth+1),
-                self._decode_recursive(bit_stream, color_stream, y, x+half_w, half_h, w-half_w, depth+1),
-                self._decode_recursive(bit_stream, color_stream, y+half_h, x, h-half_h, half_w, depth+1),
-                self._decode_recursive(bit_stream, color_stream, y+half_h, x+half_w, h-half_h, w-half_w, depth+1)
+                self._decode_recursive(bit_stream, y, x, h2, w2, depth+1),
+                self._decode_recursive(bit_stream, y, x+w2, h2, w2, depth+1),
+                self._decode_recursive(bit_stream, y+h2, x, h2, w2, depth+1),
+                self._decode_recursive(bit_stream, y+h2, x+w2, h2, w2, depth+1)
             ]
-        else: # Leaf
-            # Leer Bit de Modo
-            mode_bit = next(bit_stream)
-            if mode_bit == 0:
-                node.mode = 'flat'
-                self._read_flat_dpcm(node, color_stream)
+        else:
+            m1 = next(bit_stream)
+            m2 = next(bit_stream)
+            if m1 == 0 and m2 == 0:
+                node.mode = 'flat'; self._read_flat_dpcm(node)
+            elif m1 == 0 and m2 == 1:
+                node.mode = 'interp'; self._read_interp_dpcm(node)
+            elif m1 == 1 and m2 == 0:
+                node.mode = 'dct'; self._read_dct_block(node)
             else:
-                node.mode = 'interp'
-                self._read_interp_dpcm(node, color_stream)
-            
+                node.mode = 'flat'; self._read_flat_dpcm(node)
         return node
 
-    # --- WRITERS (Closed-Loop DPCM) ---
+    def _write_flat_dpcm(self, node, payload):
+        col = node.color_tl if node.color_tl is not None else np.array([128,128,128])
+        y, cb, cr = self._rgb_to_ycbcr(col)
+        payload.append(int(y - self.prev_y) % 256); self.prev_y = (self.prev_y + int(y - self.prev_y)) % 256
+        payload.append(int(cb - self.prev_cb) % 256); self.prev_cb = (self.prev_cb + int(cb - self.prev_cb)) % 256
+        payload.append(int(cr - self.prev_cr) % 256); self.prev_cr = (self.prev_cr + int(cr - self.prev_cr)) % 256
 
-    def _write_flat_dpcm(self, node, stream):
-        # Flat: Promedio de las esquinas (o la que se tenga)
-        # Nota: El RDO calculó costo basado en un color. Usamos promedio de esquinas actuales.
-        raw = [node.color_tl, node.color_tr, node.color_bl, node.color_br]
-        # Filtrar Nones
-        valid = [c for c in raw if c is not None]
-        if not valid: avg_col = np.zeros(3)
-        else: avg_col = np.mean(valid, axis=0)
+    def _read_flat_dpcm(self, node):
+        chunk = self._read_bytes(3)
+        y = (self.prev_y + chunk[0]) % 256; self.prev_y = y
+        cb = (self.prev_cb + chunk[1]) % 256; self.prev_cb = cb
+        cr = (self.prev_cr + chunk[2]) % 256; self.prev_cr = cr
+        node.color_tl = self._ycbcr_to_rgb(y, cb, cr)
 
-        y, cb, cr = self._rgb_to_ycbcr(avg_col)
-        
-        # 1. Luma (1 valor)
-        diff = int(y - self.prev_y) % 256
-        stream.append(diff)
-        self.prev_y = (self.prev_y + diff) % 256 # Update Closed-Loop
-
-        # 2. Chroma (1 valor)
-        diff_cb = int(cb - self.prev_cb) % 256
-        diff_cr = int(cr - self.prev_cr) % 256
-        stream.append(diff_cb)
-        stream.append(diff_cr)
-        self.prev_cb = (self.prev_cb + diff_cb) % 256
-        self.prev_cr = (self.prev_cr + diff_cr) % 256
-
-    def _write_interp_dpcm(self, node, stream):
-        raw = [node.color_tl, node.color_tr, node.color_bl, node.color_br]
-        colors = [c if c is not None else np.zeros(3) for c in raw]
-        
+    def _write_interp_dpcm(self, node, payload):
+        corners = [node.color_tl, node.color_tr, node.color_bl, node.color_br]
         ys, cbs, crs = [], [], []
-        for c in colors:
+        for c in corners:
+            if c is None: c = np.array([128,128,128])
             _y, _cb, _cr = self._rgb_to_ycbcr(c)
             ys.append(_y); cbs.append(_cb); crs.append(_cr)
-            
-        # 1. Luma (4 valores)
         for val_y in ys:
-            diff = int(val_y - self.prev_y) % 256
-            stream.append(diff)
-            self.prev_y = (self.prev_y + diff) % 256 # Update per pixel
+            payload.append(int(val_y - self.prev_y) % 256); self.prev_y = (self.prev_y + int(val_y - self.prev_y)) % 256
+        avg_cb = np.mean(cbs); avg_cr = np.mean(crs)
+        payload.append(int(avg_cb - self.prev_cb) % 256); self.prev_cb = (self.prev_cb + int(avg_cb - self.prev_cb)) % 256
+        payload.append(int(avg_cr - self.prev_cr) % 256); self.prev_cr = (self.prev_cr + int(avg_cr - self.prev_cr)) % 256
 
-        # 2. Chroma (Promedio, 1 valor compartido)
-        avg_cb = np.mean(cbs)
-        avg_cr = np.mean(crs)
-        
-        diff_cb = int(avg_cb - self.prev_cb) % 256
-        diff_cr = int(avg_cr - self.prev_cr) % 256
-        stream.append(diff_cb)
-        stream.append(diff_cr)
-        
-        self.prev_cb = (self.prev_cb + diff_cb) % 256
-        self.prev_cr = (self.prev_cr + diff_cr) % 256
-
-    # --- READERS ---
-
-    def _read_flat_dpcm(self, node, stream):
-        # 1. Luma
-        d_y = next(stream)
-        y = (self.prev_y + d_y) % 256
-        self.prev_y = y
-        
-        # 2. Chroma
-        d_cb = next(stream); d_cr = next(stream)
-        cb = (self.prev_cb + d_cb) % 256
-        cr = (self.prev_cr + d_cr) % 256
-        self.prev_cb, self.prev_cr = cb, cr
-        
-        # Reconstruir (Las 4 esquinas iguales)
-        col = self._ycbcr_to_rgb(y, cb, cr)
-        node.color_tl = node.color_tr = node.color_bl = node.color_br = col
-
-    def _read_interp_dpcm(self, node, stream):
-        # 1. Luma (4 valores)
-        rec_ys = []
-        for _ in range(4):
-            d_y = next(stream)
-            y = (self.prev_y + d_y) % 256
-            rec_ys.append(y)
-            self.prev_y = y
-            
-        # 2. Chroma (1 valor)
-        d_cb = next(stream); d_cr = next(stream)
-        cb = (self.prev_cb + d_cb) % 256
-        cr = (self.prev_cr + d_cr) % 256
-        self.prev_cb, self.prev_cr = cb, cr
-        
-        # Reconstruir
+    def _read_interp_dpcm(self, node):
+        chunk_y = self._read_bytes(4); rec_ys = []
+        for d_y in chunk_y:
+            y = (self.prev_y + d_y) % 256; rec_ys.append(y); self.prev_y = y
+        chunk_c = self._read_bytes(2)
+        cb = (self.prev_cb + chunk_c[0]) % 256; self.prev_cb = cb
+        cr = (self.prev_cr + chunk_c[1]) % 256; self.prev_cr = cr
         node.color_tl = self._ycbcr_to_rgb(rec_ys[0], cb, cr)
         node.color_tr = self._ycbcr_to_rgb(rec_ys[1], cb, cr)
         node.color_bl = self._ycbcr_to_rgb(rec_ys[2], cb, cr)
         node.color_br = self._ycbcr_to_rgb(rec_ys[3], cb, cr)
 
-    # --- HELPERS LOW LEVEL ---
+    def _write_dct_block(self, node, payload):
+        coeffs = node.dct_coeffs
+        dc_val = coeffs[0]
+        payload.extend(struct.pack('>h', dc_val - self.prev_dc))
+        self.prev_dc = dc_val
+        run = 0
+        for i in range(1, 64):
+            val = coeffs[i]
+            if val == 0: run += 1
+            else:
+                payload.append(run)
+                payload.extend(struct.pack('>h', val))
+                run = 0
+        payload.append(0); payload.extend(struct.pack('>h', 0))
+        col = node.color_tl if node.color_tl is not None else np.array([128,128,128])
+        _, cb, cr = self._rgb_to_ycbcr(col)
+        payload.append(int(cb - self.prev_cb) % 256); self.prev_cb = (self.prev_cb + int(cb - self.prev_cb)) % 256
+        payload.append(int(cr - self.prev_cr) % 256); self.prev_cr = (self.prev_cr + int(cr - self.prev_cr)) % 256
+
+    def _read_dct_block(self, node):
+        chunk_dc = self._read_bytes(2)
+        dc_val = self.prev_dc + struct.unpack('>h', chunk_dc)[0]; self.prev_dc = dc_val
+        
+        # --- CORRECCIÓN CRÍTICA AQUÍ ---
+        # Usamos np.int32 para evitar OverflowError si el DPCM se acumula por encima de 32767
+        coeffs = np.zeros(64, dtype=np.int32) 
+        coeffs[0] = dc_val
+        
+        idx = 1
+        while idx < 64:
+            run = self._read_bytes(1)[0]
+            val = struct.unpack('>h', self._read_bytes(2))[0]
+            if run == 0 and val == 0: break
+            idx += run
+            if idx < 64: coeffs[idx] = val; idx += 1
+        node.dct_coeffs = coeffs
+        chunk_c = self._read_bytes(2)
+        cb = (self.prev_cb + chunk_c[0]) % 256; self.prev_cb = cb
+        cr = (self.prev_cr + chunk_c[1]) % 256; self.prev_cr = cr
+        node.color_tl = self._ycbcr_to_rgb(128, cb, cr)
+
     def _pack_bits(self, bits):
         byte_arr = bytearray()
         cur, cnt = 0, 0
         for b in bits:
             if b: cur |= (1 << (7 - cnt))
             cnt += 1
-            if cnt == 8:
-                byte_arr.append(cur)
-                cur, cnt = 0, 0
+            if cnt == 8: byte_arr.append(cur); cur, cnt = 0, 0
         if cnt > 0: byte_arr.append(cur)
         return bytes(byte_arr)
 
     def _bit_generator(self, packed):
         for b in packed:
-            for i in range(7, -1, -1):
-                yield (b >> i) & 1
+            for i in range(7, -1, -1): yield (b >> i) & 1
+
+    def _read_bytes(self, count):
+        chunk = self.data_buffer[self.data_ptr : self.data_ptr + count]
+        self.data_ptr += count
+        return chunk
 
     def _rgb_to_ycbcr(self, c):
         r, g, b = c

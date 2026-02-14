@@ -1,3 +1,4 @@
+# SCRIPT PARA DESCARGAR EL KODAK DATASET DE IMÁGENES LOSSLESS
 import os
 import requests
 from pathlib import Path

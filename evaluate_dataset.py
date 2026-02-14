@@ -1,36 +1,42 @@
-import os
+# Evaluación del Dataset con Parámetros Optimizados
+# Este script recorre el dataset de Kodak, aplica tu método propuesto con los parámetros optimizados, y también evalúa el baseline y las referencias JPEG/WebP. Los resultados se guardan en un CSV para su posterior análisis y visualización.
 import cv2
 import pandas as pd
 import time
-from pathlib import Path
 import numpy as np
+from pathlib import Path
+from tqdm import tqdm
 
-# Importaciones de tu proyecto
-from src.metrics import QualityMetrics
+# Importaciones
 from src.quadtree import QuadtreeCompressor
-from src.saliency import SaliencyDetector
 from src.codec import QuadtreeCodec
+from src.saliency import SaliencyDetector
+from src.metrics import QualityMetrics
 
 def evaluate():
-    # --- CONFIGURACIÓN ---
+    # --- CONFIGURACIÓN OPTIMIZADA ---
+    # Valores obtenidos de tu optimización
+    FIXED_LOW_TH = 9.9987
+    ALPHA_OPT    = 5.1542
+    BETA_OPT     = 4.9655
+    
+    # Rutas
     dataset_path = Path("data/kodak")
     output_csv = "results/benchmark_results_final.csv" 
     model_path = "models/u2net.pth"
     
-    FIXED_LOW_TH = 19.9523
-    ALPHA_OPT    = 7.7880
-    BETA_OPT     = 4.6632
+    # Puntos de operación (Lambda)
+    # Cubrimos un rango amplio para generar curvas completas
+    rdo_lambdas = [5, 10, 20, 40, 70, 110, 150, 200, 300, 500, 1000]
     
-    # Barrido de Lambdas (Control de Calidad vs Peso)
-    rdo_lambdas = [1, 5, 10, 20, 40, 70, 110, 150]
-    
-    # Calidades de referencia
-    jpeg_qualities = [10, 20, 40, 60, 80, 95]
-    webp_qualities = [10, 20, 40, 60, 80, 95]
+    # Referencias
+    jpeg_qualities = [5, 10, 20, 30, 50, 70, 90]
+    webp_qualities = [5, 10, 20, 30, 50, 70, 90]
 
-    # Inicializar Modelos
+    # Iniciar Motores
+    print("Cargando modelos...")
     saliency_detector = SaliencyDetector(weights_path=model_path)
-    metrics = QualityMetrics()
+    metrics_engine = QualityMetrics()
     codec = QuadtreeCodec()
     
     if not dataset_path.exists():
@@ -40,103 +46,141 @@ def evaluate():
     images = sorted(list(dataset_path.glob("*.png")))
     results = []
 
-    print(f"Iniciando evaluación FINAL con Parámetros Optimizados...")
-    print(f"Configuración: Th={FIXED_LOW_TH:.2f}, Alpha={ALPHA_OPT:.2f}, Beta={BETA_OPT:.2f}")
+    print(f"Iniciando Benchmark Final...")
+    print(f"Params: Th={FIXED_LOW_TH:.2f}, Alpha={ALPHA_OPT:.2f}, Beta={BETA_OPT:.2f}")
 
-    for img_path in images:
-        print(f"\nProcesando: {img_path.name}")
-        
+    for img_path in tqdm(images, desc="Procesando Dataset"):
         # Cargar Imagen
-        img_rgb = cv2.imread(str(img_path))
-        img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2RGB)
-        h, w = img_rgb.shape[:2]
+        img_bgr = cv2.imread(str(img_path))
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        h_orig, w_orig = img_rgb.shape[:2]
+        pixels = h_orig * w_orig
         
         # Mapa de Saliencia
         smap = saliency_detector.get_saliency_map(img_rgb)
         
-        # --- 1. OUR METHOD (Multi-Mode RDO + Saliency) ---
-        compressor = QuadtreeCompressor(min_block_size=4, max_depth=12)
-        
+        # --- 1. PROPOSED METHOD (Saliency RDO) ---
         for lam in rdo_lambdas:
             start_time = time.time()
             
-            # Compresión: 
-            # - Threshold bajo (5) para crear un árbol detallado.
-            # - RDO podará usando Lambda y protegerá con Beta=2.0 (Saliencia).
-            # - Ahora el RDO elige automáticamente entre 'Flat' y 'Interp'.
-            compressor.compress(img_rgb, smap, threshold=FIXED_LOW_TH, alpha=ALPHA_OPT, lam=lam, beta=BETA_OPT)
+            compressor = QuadtreeCompressor(min_block_size=8, max_depth=10)
+            compressor.compress(
+                img_rgb, smap, 
+                threshold=FIXED_LOW_TH, 
+                alpha=ALPHA_OPT, 
+                lam=lam, 
+                beta=BETA_OPT
+            )
             
-            # Codificación (El codec detecta automáticamente los modos guardados en los nodos)
-            compressed_bytes = codec.compress(compressor.root, (h, w), mode='optimized')
-            bpp = len(compressed_bytes) * 8 / (h * w)
+            # Recuperamos la calidad dinámica calculada por el compresor
+            quality_used = compressor.dynamic_quality
+
+            padded_shape = (compressor.root.h, compressor.root.w)
+            
+            # Pasamos esa calidad al codec
+            bitstream = codec.compress(compressor.root, padded_shape, quality_factor=quality_used)
+            
+            bpp = (len(bitstream) * 8) / pixels
             t_enc = time.time() - start_time
             
-            # Reconstrucción
-            rec_root, _ = codec.decompress(compressed_bytes)
-            rec_img = compressor.reconstruct(rec_root) # El reconstruct lee el modo (flat/interp) del nodo
+            # Decodificación (Recibimos 3 valores ahora)
+            root_dec, _, q_read = codec.decompress(bitstream)
             
-            m = metrics.calculate_all(img_rgb, rec_img, saliency_map=smap)
+            compressor.orig_h = h_orig
+            compressor.orig_w = w_orig
             
-            # Guardamos con el nombre nuevo
-            res = {
+            # Reconstruimos usando la calidad leída del archivo
+            rec_img = compressor.reconstruct(root_dec, override_quality=q_read)
+            
+            m = metrics_engine.calculate_all(img_rgb, rec_img, saliency_map=smap)
+            
+            results.append({
                 "Image": img_path.name,
-                "Method": "Ours (Multi-Mode RDO)", 
+                "Method": "Proposed (Saliency RDO)", 
                 "Param": lam,
                 "BPP": bpp,
-                "Time_s": t_enc,
-                **m
-            }
-            results.append(res)
-            print(f"  [Ours] Lam={lam}: BPP={bpp:.3f}, SSIM={m['ssim']:.3f}, SW-SSIM={m['sw_ssim']:.3f}")
+                "Time": t_enc,
+                "PSNR": m['psnr'],
+                "SSIM": m['ssim'],
+                "SW-SSIM": m['sw_ssim'],
+                "LPIPS": m['lpips']
+            })
 
-        # --- 2. BASELINE (Standard RDO - Sin Saliencia) ---
+        # --- 2. BASELINE (Standard RDO) ---
         for lam in rdo_lambdas:
-            start_time = time.time()
+            # Baseline usa Alpha=0, Beta=0 (Sin Saliencia)
+            compressor = QuadtreeCompressor(min_block_size=8, max_depth=10)
+            compressor.compress(
+                img_rgb, smap, 
+                threshold=FIXED_LOW_TH, 
+                alpha=0.0, # Apagado
+                lam=lam, 
+                beta=0.0   # Apagado
+            )
             
-            # Beta=0.0 apaga la protección de saliencia. Es un RDO matemático puro.
-            compressor.compress(img_rgb, smap, threshold=FIXED_LOW_TH, alpha=0.0, lam=lam, beta=0.0)
+            # --- CORRECCIÓN AQUÍ ---
+            # El Baseline TAMBIÉN debe usar calidad dinámica (depende de Lambda, no de saliencia)
+            quality_used = compressor.dynamic_quality
             
-            compressed_bytes = codec.compress(compressor.root, (h, w), mode='optimized')
-            bpp = len(compressed_bytes) * 8 / (h * w)
-            t_enc = time.time() - start_time
+            padded_shape = (compressor.root.h, compressor.root.w)
             
-            rec_root, _ = codec.decompress(compressed_bytes)
-            rec_img = compressor.reconstruct(rec_root)
+            # Pasamos calidad al codec
+            bitstream = codec.compress(compressor.root, padded_shape, quality_factor=quality_used)
             
-            m = metrics.calculate_all(img_rgb, rec_img, saliency_map=smap)
+            bpp = (len(bitstream) * 8) / pixels
             
-            res = {
+            # Desempaquetamos correctamente los 3 valores
+            root_dec, _, q_read = codec.decompress(bitstream)
+            
+            compressor.orig_h = h_orig
+            compressor.orig_w = w_orig
+            
+            # Reconstruimos con la calidad correcta
+            rec_img = compressor.reconstruct(root_dec, override_quality=q_read)
+            # -----------------------
+            
+            m = metrics_engine.calculate_all(img_rgb, rec_img, saliency_map=smap)
+            
+            results.append({
                 "Image": img_path.name,
-                "Method": "Standard RDO (No Saliency)",
+                "Method": "Baseline (Standard RDO)", 
                 "Param": lam,
                 "BPP": bpp,
-                "Time_s": t_enc,
-                **m
-            }
-            results.append(res)
+                "Time": 0,
+                "PSNR": m['psnr'],
+                "SSIM": m['ssim'],
+                "SW-SSIM": m['sw_ssim'],
+                "LPIPS": m['lpips']
+            })
 
-        # --- 3. JPEG & WebP (Referencias) ---
-        # (Este bloque se mantiene igual para tener contexto)
+        # --- 3. REFERENCIAS ---
         for q in jpeg_qualities:
-            _, enc = cv2.imencode('.jpg', cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, q])
-            bpp = len(enc) * 8 / (h * w)
+            _, enc = cv2.imencode('.jpg', img_bgr, [cv2.IMWRITE_JPEG_QUALITY, q])
+            bpp = len(enc) * 8 / pixels
             dec = cv2.imdecode(enc, cv2.IMREAD_COLOR)
             dec = cv2.cvtColor(dec, cv2.COLOR_BGR2RGB)
-            m = metrics.calculate_all(img_rgb, dec)
-            results.append({"Image": img_path.name, "Method": "JPEG", "Param": q, "BPP": bpp, **m})
+            m = metrics_engine.calculate_all(img_rgb, dec, saliency_map=smap)
+            results.append({
+                "Image": img_path.name, "Method": "JPEG", "Param": q, 
+                "BPP": bpp, "Time": 0, "PSNR": m['psnr'], "SSIM": m['ssim'], "SW-SSIM": m['sw_ssim'], "LPIPS": m['lpips']
+            })
 
         for q in webp_qualities:
-            _, enc = cv2.imencode('.webp', cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_WEBP_QUALITY, q])
-            bpp = len(enc) * 8 / (h * w)
+            _, enc = cv2.imencode('.webp', img_bgr, [cv2.IMWRITE_WEBP_QUALITY, q])
+            bpp = len(enc) * 8 / pixels
             dec = cv2.imdecode(enc, cv2.IMREAD_COLOR)
             dec = cv2.cvtColor(dec, cv2.COLOR_BGR2RGB)
-            m = metrics.calculate_all(img_rgb, dec)
-            results.append({"Image": img_path.name, "Method": "WebP", "Param": q, "BPP": bpp, **m})
+            m = metrics_engine.calculate_all(img_rgb, dec, saliency_map=smap)
+            results.append({
+                "Image": img_path.name, "Method": "WebP", "Param": q, 
+                "BPP": bpp, "Time": 0, "PSNR": m['psnr'], "SSIM": m['ssim'], "SW-SSIM": m['sw_ssim'], "LPIPS": m['lpips']
+            })
 
-    # Guardar CSV
+    # Guardar
     df = pd.DataFrame(results)
+    Path("results").mkdir(exist_ok=True)
     df.to_csv(output_csv, index=False)
-    print(f"\nEvaluación completa. Resultados guardados en {output_csv}")
+    print(f"\nResultados guardados en {output_csv}")
 
 if __name__ == "__main__":
     evaluate()
