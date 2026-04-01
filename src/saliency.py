@@ -136,7 +136,7 @@ class SaliencyDetector:
             d1, *_ = self.model(input_tensor)
             
             # Aplicar Sigmoid para obtener probabilidad y Normalizar
-            pred = torch.sigmoid(d1[:, 0, :, :])
+            pred = d1[:, 0, :, :]
             
             # Post-procesamiento
             pred = pred.squeeze().cpu().numpy()

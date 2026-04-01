@@ -1,123 +1,153 @@
 import matplotlib
-matplotlib.use('Agg') # Backend sin ventana para evitar errores de GTK
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
+# Configurar backend no interactivo ANTES de importar pyplot
+# Esto evita el error de GTK/Qt/Tkinter en servidores o entornos virtuales
+matplotlib.use('Agg') 
 
-def plot_rd_curves():
-    csv_path = "results/benchmark_results_final.csv"
-    if not Path(csv_path).exists():
-        print("No se encuentra el CSV de resultados.")
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from pathlib import Path
+import numpy as np
+
+def plot_all_metrics(csv_path="results/benchmark_results_full_metrics.csv", output_dir="results/plots"):
+    # 1. Configuración Inicial
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        print(f"Error: No se encontró el archivo {csv_path}")
         return
 
-    # 1. Cargar Datos
-    df = pd.read_csv(csv_path)
+    # Definir estilo y paleta
+    sns.set_theme(style="whitegrid")
     
-    # 2. Verificar qué nombres de métodos existen realmente en el CSV
-    print("Métodos encontrados en el CSV:", df['Method'].unique())
+    unique_methods = df['Method'].unique()
+    # Usamos una paleta amigable para daltónicos o simplemente clara
+    palette = sns.color_palette("bright", len(unique_methods))
+    method_colors = dict(zip(unique_methods, palette))
 
-    # 3. AGREGACIÓN
-    # Promediamos los resultados de las 24 imágenes para cada punto de operación
-    df_avg = df.groupby(['Method', 'Param'], as_index=False).agg({
-        'BPP': 'mean',
-        'PSNR': 'mean',
-        'SSIM': 'mean',
-        'SW-SSIM': 'mean',
-        'LPIPS': 'mean'
-    })
+    print(f"Cargado {len(df)} filas. Métodos encontrados: {unique_methods}")
 
-    # Ordenamos por BPP para que la línea se dibuje bien
-    df_avg = df_avg.sort_values(by=['Method', 'BPP'])
-
-    # Métricas a graficar
-    metrics = [
-        ("SW-SSIM", "Calidad Ponderada (Tu Fuerte)", "Mayor es mejor", "lower right"),
-        ("SSIM", "Similitud Estructural", "Mayor es mejor", "lower right"),
-        ("PSNR", "Fidelidad de Señal (dB)", "Mayor es mejor", "lower right"),
-        ("LPIPS", "Distancia Perceptual", "Menor es mejor", "upper right")
+    # -------------------------------------------------------------------------
+    # 2. DEFINICIÓN DE GRÁFICOS A GENERAR
+    # -------------------------------------------------------------------------
+    
+    # A. Curvas de Calidad (Rate-Distortion Curves)
+    qa_metrics = [
+        ('PSNR', 'PSNR (dB)', 'Higher is better'),
+        ('SSIM', 'SSIM', 'Higher is better'),
+        ('MS-SSIM', 'MS-SSIM', 'Higher is better'),
+        ('SW-SSIM', 'Saliency Weighted SSIM', 'Higher is better'),
+        ('VIF', 'Visual Information Fidelity', 'Higher is better'),
+        ('LPIPS', 'LPIPS (Perceptual Error)', 'Lower is better'),
     ]
-    
-    sns.set_style("whitegrid")
-    
-    # --- DICCIONARIOS CORREGIDOS ---
-    # Usamos los nombres exactos que reportó tu error
-    palette = {
-        "Proposed (Saliency RDO)": "tab:red",   # Tu método = Rojo
-        "Baseline (Standard RDO)": "tab:blue",  # Baseline = Azul
-        "JPEG": "tab:green",
-        "WebP": "tab:orange",
-        # Fallbacks por si acaso (para compatibilidad con versiones viejas)
-        "Ours (Multi-Mode RDO)": "tab:red",
-        "Standard RDO (No Saliency)": "tab:blue"
-    }
-    
-    dashes = {
-        "Proposed (Saliency RDO)": "",          # Sólida
-        "Baseline (Standard RDO)": (2,2),       # Punteada
-        "JPEG": (5,5),
-        "WebP": (1,1),
-        "Ours (Multi-Mode RDO)": "",
-        "Standard RDO (No Saliency)": (2,2)
-    }
-    
-    markers = {
-        "Proposed (Saliency RDO)": "o",
-        "Baseline (Standard RDO)": "X",
-        "JPEG": "s",
-        "WebP": "^",
-        "Ours (Multi-Mode RDO)": "o",
-        "Standard RDO (No Saliency)": "X"
-    }
 
-    for metric, title, ylabel, legend_loc in metrics:
-        try:
-            plt.figure(figsize=(10, 6))
-            
-            sns.lineplot(
-                data=df_avg, 
-                x="BPP", 
-                y=metric, 
-                hue="Method", 
-                style="Method",
-                palette=palette,
-                dashes=dashes,
-                markers=markers,
-                markersize=8,
-                linewidth=2.5
-            )
-            
-            plt.title(f"Curva Rate-Distortion: {title}", fontsize=14)
-            plt.xlabel("Bits Per Pixel (BPP) - Promedio Dataset", fontsize=12)
-            plt.ylabel(ylabel, fontsize=12)
-            plt.legend(loc=legend_loc, frameon=True, shadow=True)
-            plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-            plt.minorticks_on()
-            plt.xlim(0, 1.8) 
-            
-            # --- PARTE MODIFICADA ---
-            safe_name = metric.replace("-", "_").lower()
-            
-            # 1. Guardar versión con auto-escala (zoom en los datos)
-            output_file = f"results/rd_curve_{safe_name}.png"
-            plt.savefig(output_file, dpi=300, bbox_inches='tight')
-            
-            # 2. Ajustar eje Y para que inicie en 0 y guardar como nueva imagen
-            plt.ylim(bottom=0) # Fuerza el inicio en 0, mantiene el máximo automático
-            
-            # Opcional: Si es SSIM o SW-SSIM, podrías querer fijar el máximo en 1.0
-            if "SSIM" in metric:
-                plt.ylim(0, 1.05) 
+    # B. Métricas de Rendimiento
+    perf_metrics = [
+        ('Enc_Time(s)', 'Encoding Time (s)', 'Lower is better'),
+        ('Dec_Time(s)', 'Decoding Time (s)', 'Lower is better'),
+        ('Enc_Mem(MB)', 'Encoding Peak Memory (MB)', 'Lower is better'),
+        ('Dec_Mem(MB)', 'Decoding Peak Memory (MB)', 'Lower is better'),
+    ]
 
-            output_file_y0 = f"results/rd_curve_{safe_name}_y0.png"
-            plt.savefig(output_file_y0, dpi=300, bbox_inches='tight')
-            # -------------------------
+    # -------------------------------------------------------------------------
+    # 3. GENERACIÓN DE CURVAS RD (Métricas vs BPP)
+    # -------------------------------------------------------------------------
+    print("Generando curvas Rate-Distortion...")
+    
+    # Unimos ambas listas para iterar
+    all_metrics_to_plot = qa_metrics + perf_metrics
 
-            plt.close()
-            print(f"Gráficas guardadas: {output_file} y {output_file_y0}")
+    for metric, ylabel, direction in all_metrics_to_plot:
+        if metric not in df.columns:
+            print(f"Advertencia: La métrica '{metric}' no está en el CSV. Saltando.")
+            continue
+
+        plt.figure(figsize=(10, 6))
+        
+        # Agrupamos por Method y Param para obtener el punto medio exacto de cada configuración
+        df_mean = df.groupby(['Method', 'Param']).mean(numeric_only=True).reset_index()
+        df_mean = df_mean.sort_values(by=['Method', 'BPP'])
+
+        sns.lineplot(
+            data=df_mean, 
+            x='BPP', 
+            y=metric, 
+            hue='Method', 
+            style='Method',
+            markers=True, 
+            dashes=False,
+            palette=method_colors,
+            linewidth=2.5,
+            markersize=8
+        )
+
+        plt.title(f'{ylabel} vs Bitrate')
+        plt.xlabel('Bits Per Pixel (BPP)')
+        plt.ylabel(ylabel)
+        plt.grid(True, which="both", ls="-", alpha=0.5)
+        
+        safe_name = metric.replace("(", "").replace(")", "").replace("/", "_")
+        plt.savefig(f"{output_dir}/RD_Curve_{safe_name}.png", dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # -------------------------------------------------------------------------
+    # 4. GRÁFICOS DE BARRAS (Resumen Global)
+    # -------------------------------------------------------------------------
+    print("Generando gráficos de barras de resumen...")
+    
+    summary_metrics = [
+        ('Enc_Time(s)', 'Average Encoding Time (s)'),
+        ('Dec_Time(s)', 'Average Decoding Time (s)'),
+        ('Enc_Mem(MB)', 'Average Peak Memory (MB)'),
+        ('CR', 'Average Compression Ratio'),
+    ]
+
+    for metric, title in summary_metrics:
+        if metric not in df.columns:
+            continue
             
-        except Exception as e:
-            print(f"Error graficando {metric}: {e}")
+        plt.figure(figsize=(10, 6))
+        
+        sns.barplot(
+            data=df, 
+            x='Method', 
+            y=metric, 
+            hue='Method',
+            palette=method_colors,
+            capsize=.1,
+            errorbar='sd' # Muestra desviación estándar
+        )
+        
+        plt.title(title)
+        plt.ylabel(metric)
+        plt.xlabel("Method")
+        plt.xticks(rotation=15)
+        
+        # Mover la leyenda afuera si molesta, o quitarla si es redundante con el eje X
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+        
+        safe_name = metric.replace("(", "").replace(")", "").replace("/", "_")
+        plt.savefig(f"{output_dir}/Bar_Avg_{safe_name}.png", dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # -------------------------------------------------------------------------
+    # 5. MATRIZ DE CORRELACIÓN
+    # -------------------------------------------------------------------------
+    print("Generando matriz de correlación...")
+    metric_cols = [m[0] for m in qa_metrics if m[0] in df.columns]
+    
+    if len(metric_cols) > 1:
+        plt.figure(figsize=(10, 8))
+        # Seleccionamos solo las columnas numéricas relevantes
+        corr = df[metric_cols].corr()
+        sns.heatmap(corr, annot=True, cmap='coolwarm', vmin=-1, vmax=1, fmt=".2f")
+        plt.title("Correlation Matrix of Quality Metrics")
+        plt.savefig(f"{output_dir}/Correlation_Matrix.png", dpi=300, bbox_inches='tight')
+        plt.close()
+
+    print(f"\n¡Listo! Todos los gráficos se han guardado en: {output_dir}/")
 
 if __name__ == "__main__":
-    plot_rd_curves()
+    plot_all_metrics()
