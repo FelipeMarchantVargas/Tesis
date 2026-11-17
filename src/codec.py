@@ -243,7 +243,7 @@ class QuadtreeCodec:
         coeffs[0] = dc_val
         
         idx = 1
-        while idx < 64:
+        while True:  # el encoder siempre escribe EOB; consumirlo aunque idx llegue a 64
             run = self.data_buffer[self.data_ptr]
             self.data_ptr += 1
             
