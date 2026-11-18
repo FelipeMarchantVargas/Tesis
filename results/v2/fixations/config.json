@@ -1,0 +1,10 @@
+{
+  "offset": "raw",
+  "skip_first": true,
+  "sigma_px": 34,
+  "cc_median": 0.948,
+  "n_images": 1003,
+  "n_calib": 200,
+  "n_users": 15,
+  "n_fixations": 123231
+}

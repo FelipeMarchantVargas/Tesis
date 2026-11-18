@@ -3,18 +3,23 @@
 Los mapas se guardan como PNG uint8 normalizados [0, 255] en data/saliency/<red>/<dataset>/.
 Es reanudable: omite los mapas ya existentes.
 """
+import argparse
 import time
 
 import cv2
 import numpy as np
 from tqdm import tqdm
 
-from benchmark_datasets import DATASETS, SALIENCY_NETS, list_images, saliency_path
+from benchmark_datasets import DATASETS, FIXATION_DATASETS, SALIENCY_NETS, list_images, saliency_path
 from src.saliency import get_saliency_model
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--datasets", nargs="+", default=list(DATASETS),
+                    choices=list(DATASETS) + list(FIXATION_DATASETS))
+    args = ap.parse_args()
     for net in SALIENCY_NETS:
-        jobs = [(d, p) for d in DATASETS for p in list_images(d)
+        jobs = [(d, p) for d in args.datasets for p in list_images(d)
                 if not saliency_path(net, d, p).exists()]
         if not jobs:
             continue

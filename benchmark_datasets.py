@@ -8,12 +8,16 @@ DATASETS = {
     "clic_professional": ("data/clic/CLIC2020Professional_test", "**/*.png"),
     "clic_mobile": ("data/clic/CLIC2020Mobile_test", "**/*.png"),
 }
+# Datasets con fijaciones humanas: solo para el protocolo de evaluación, fuera del benchmark.
+FIXATION_DATASETS = {
+    "mit1003": ("data/mit1003/ALLSTIMULI", "*.jpeg"),
+}
 SALIENCY_NETS = ["u2net", "mobilesal", "transalnet_dense", "transalnet_res"]
 SALIENCY_DIR = Path("data/saliency")
 
 
 def list_images(dataset):
-    root, pattern = DATASETS[dataset]
+    root, pattern = {**DATASETS, **FIXATION_DATASETS}[dataset]
     return sorted(Path(root).glob(pattern))
 
 

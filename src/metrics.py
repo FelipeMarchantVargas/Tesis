@@ -156,3 +156,43 @@ class QualityMetrics:
         
         vif_val = np.sum(num) / np.sum(den)
         return np.clip(vif_val, 0, 1)
+
+# --- Métricas ponderadas por fijaciones humanas (protocolo con MIT1003) ---------------------------
+# G es una densidad (h, w) con suma 1 (src/fixations.py: fixation_density). Con G uniforme,
+# fw_mse = MSE global y fw_lpips = media del mapa espacial de LPIPS.
+
+def fw_mse(original, reconstructed, G):
+    err = (original.astype(np.float64) - reconstructed.astype(np.float64)) ** 2
+    if err.ndim == 3:
+        err = err.mean(axis=2)
+    return float(np.sum(G * err))
+
+
+def fw_psnr(original, reconstructed, G):
+    mse = fw_mse(original, reconstructed, G)
+    return float("inf") if mse == 0 else float(10 * np.log10(255.0 ** 2 / mse))
+
+
+def lpips_spatial_map(lpips_spatial, original, reconstructed):
+    """Mapa (h, w) de LPIPS; lpips_spatial = lpips.LPIPS(net='alex', spatial=True)."""
+    def t(x):
+        return torch.from_numpy(x.astype(np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0)
+    with torch.no_grad():
+        m = lpips_spatial(t(original), t(reconstructed))[0, 0].cpu().numpy()
+    h, w = original.shape[:2]
+    return m if m.shape == (h, w) else cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def fw_lpips(lpips_map, G):
+    return float(np.sum(G * lpips_map))
+
+
+def fw_ssim(original, reconstructed, G):
+    _, smap = ssim_func(original, reconstructed, data_range=255, channel_axis=2, full=True)
+    return float(np.sum(G * smap.mean(axis=2)))
+
+
+def background_weights(G):
+    """Densidad del fondo: 1 - G/max(G), normalizada a suma 1."""
+    b = 1.0 - G / G.max()
+    return b / b.sum() if b.sum() > 0 else np.full_like(G, 1.0 / G.size)
