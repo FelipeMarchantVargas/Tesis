@@ -135,7 +135,7 @@ def run_optimization():
         return total_loss / len(cache_data)
 
     # --- EJECUCIÓN ---
-    study = optuna.create_study(direction="minimize")
+    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
     
     print("\nIniciando búsqueda de la 'Trinidad' de parámetros...")
     study.optimize(objective, n_trials=N_TRIALS)

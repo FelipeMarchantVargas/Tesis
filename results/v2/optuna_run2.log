@@ -1,0 +1,75 @@
+/home/walala/Escritorio/Tesis_ICI/venv/lib/python3.12/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/home/walala/Escritorio/Tesis_ICI/venv/lib/python3.12/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=AlexNet_Weights.IMAGENET1K_V1`. You can also use `weights=AlexNet_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+--- Optimizando Hiperparámetros (Threshold, Alpha, Beta) ---
+Cargando modelos...
+[SaliencyDetector] Modelo cargado exitosamente en cuda
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]
+Loading model from: /home/walala/Escritorio/Tesis_ICI/venv/lib/python3.12/site-packages/lpips/weights/v0.1/alex.pth
+Pre-cargando 8 imágenes para optimización rápida...
+  0%|          | 0/8 [00:00<?, ?it/s] 12%|█▎        | 1/8 [00:00<00:02,  3.09it/s] 25%|██▌       | 2/8 [00:00<00:01,  3.72it/s] 38%|███▊      | 3/8 [00:00<00:01,  3.98it/s] 50%|█████     | 4/8 [00:01<00:00,  4.12it/s] 62%|██████▎   | 5/8 [00:01<00:00,  4.19it/s] 75%|███████▌  | 6/8 [00:01<00:00,  4.26it/s] 88%|████████▊ | 7/8 [00:01<00:00,  4.27it/s]100%|██████████| 8/8 [00:01<00:00,  4.29it/s]100%|██████████| 8/8 [00:01<00:00,  4.13it/s]
+[I 2026-11-17 01:22:35,334] A new study created in memory with name: no-name-47eb6c6d-6e1b-44bd-9053-a300fb452661
+[I 2026-11-17 01:22:40,864] Trial 0 finished with value: 0.20847719988182453 and parameters: {'threshold': 44.9448142616835, 'alpha': 38.02857225639664, 'beta': 29.279757672456203}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:22:45,231] Trial 1 finished with value: 0.3709484708106313 and parameters: {'threshold': 71.83901810364439, 'alpha': 6.240745617697461, 'beta': 6.239780813448106}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:22:53,895] Trial 2 finished with value: 0.2693121138440514 and parameters: {'threshold': 6.970033460183935, 'alpha': 34.647045830997406, 'beta': 24.04460046972835}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:22:57,190] Trial 3 finished with value: 0.7396266545703812 and parameters: {'threshold': 84.96870933552546, 'alpha': 0.8233797718320979, 'beta': 38.79639408647977}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:23:01,582] Trial 4 finished with value: 0.43430914944080157 and parameters: {'threshold': 99.89311689605061, 'alpha': 8.493564427131046, 'beta': 7.272998688284025}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:23:08,463] Trial 5 finished with value: 0.2410912883390821 and parameters: {'threshold': 22.00854118241206, 'alpha': 12.169689718381509, 'beta': 20.990257265289515}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:23:13,306] Trial 6 finished with value: 0.2816964310320064 and parameters: {'threshold': 51.83340223705389, 'alpha': 11.649165607921677, 'beta': 24.47411578889518}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:23:20,693] Trial 7 finished with value: 0.2441530449243544 and parameters: {'threshold': 16.73926327824502, 'alpha': 11.685785941408726, 'beta': 14.654473731747668}. Best is trial 0 with value: 0.20847719988182453.
+[I 2026-11-17 01:23:25,568] Trial 8 finished with value: 0.200174610158997 and parameters: {'threshold': 54.72839810604431, 'alpha': 31.407038455720546, 'beta': 7.986951286334389}. Best is trial 8 with value: 0.200174610158997.
+[I 2026-11-17 01:23:30,291] Trial 9 finished with value: 0.2729444071037028 and parameters: {'threshold': 61.708132609633395, 'alpha': 23.6965827544817, 'beta': 1.858016508799909}. Best is trial 8 with value: 0.200174610158997.
+[I 2026-11-17 01:23:34,688] Trial 10 finished with value: 0.26349107082778667 and parameters: {'threshold': 96.90928884439163, 'alpha': 31.08948503325973, 'beta': 7.709618617237243}. Best is trial 8 with value: 0.200174610158997.
+[I 2026-11-17 01:23:39,564] Trial 11 finished with value: 0.19866740639340924 and parameters: {'threshold': 57.72735278438083, 'alpha': 37.3498025434413, 'beta': 36.73593812515867}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:23:44,308] Trial 12 finished with value: 0.27154627929573827 and parameters: {'threshold': 63.689914725559014, 'alpha': 27.800054150509972, 'beta': 27.503521001394788}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:23:48,899] Trial 13 finished with value: 0.27526049164681166 and parameters: {'threshold': 67.45264684958332, 'alpha': 18.223589674960238, 'beta': 38.07876929531011}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:23:56,419] Trial 14 finished with value: 0.2494749573278554 and parameters: {'threshold': 14.90673534851905, 'alpha': 37.878475055605975, 'beta': 3.1077016480574358}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:01,686] Trial 15 finished with value: 0.21204860793025393 and parameters: {'threshold': 44.39861382996915, 'alpha': 26.36631112946015, 'beta': 12.422461048046198}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:06,470] Trial 16 finished with value: 0.27123768721322683 and parameters: {'threshold': 63.12688133453902, 'alpha': 36.74503588085878, 'beta': 9.350936257271542}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:11,113] Trial 17 finished with value: 0.2652331528284782 and parameters: {'threshold': 76.73242914586356, 'alpha': 38.90792914733588, 'beta': 18.96351427378367}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:16,019] Trial 18 finished with value: 0.19981864182218312 and parameters: {'threshold': 55.60994495914362, 'alpha': 33.15833629399381, 'beta': 18.812279268943094}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:22,030] Trial 19 finished with value: 0.23215490484301615 and parameters: {'threshold': 31.878394813983164, 'alpha': 30.755403435762354, 'beta': 30.783810504419446}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:27,681] Trial 20 finished with value: 0.2200507614974581 and parameters: {'threshold': 37.433831074440576, 'alpha': 39.226338182891446, 'beta': 38.10823065292189}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:32,080] Trial 21 finished with value: 0.26350344648765234 and parameters: {'threshold': 94.73724795833577, 'alpha': 30.86656573027753, 'beta': 34.19599402357448}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:36,728] Trial 22 finished with value: 0.2658807430121276 and parameters: {'threshold': 72.61500748270204, 'alpha': 39.40292535489617, 'beta': 37.0336059539968}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:42,250] Trial 23 finished with value: 0.21438513324349484 and parameters: {'threshold': 40.49022185230067, 'alpha': 32.27796864931373, 'beta': 20.322709949980155}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:47,554] Trial 24 finished with value: 0.20941693705582387 and parameters: {'threshold': 43.974111289781554, 'alpha': 39.323061525249244, 'beta': 11.667088061746977}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:51,929] Trial 25 finished with value: 0.2665962402740979 and parameters: {'threshold': 91.33534650133227, 'alpha': 29.52492308545241, 'beta': 18.244976881305828}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:24:57,696] Trial 26 finished with value: 0.22421006614184186 and parameters: {'threshold': 35.31605185495272, 'alpha': 31.83391683223507, 'beta': 5.368031050115004}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:25:04,777] Trial 27 finished with value: 0.2386582068701112 and parameters: {'threshold': 19.143707796821616, 'alpha': 36.5635712585256, 'beta': 36.70444447491292}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:25:09,389] Trial 28 finished with value: 0.2658907906810702 and parameters: {'threshold': 74.88444496554722, 'alpha': 33.325890654400524, 'beta': 30.269059660450534}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:25:14,130] Trial 29 finished with value: 0.26978811832162064 and parameters: {'threshold': 66.24874405065218, 'alpha': 34.165019373096506, 'beta': 23.473170101958686}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:25:18,684] Trial 30 finished with value: 0.2616949095243691 and parameters: {'threshold': 86.90949101741901, 'alpha': 39.961684306196474, 'beta': 33.13879278150694}. Best is trial 11 with value: 0.19866740639340924.
+[I 2026-11-17 01:25:23,538] Trial 31 finished with value: 0.19813207537945543 and parameters: {'threshold': 58.919956283898216, 'alpha': 36.89977681544067, 'beta': 31.003160627232397}. Best is trial 31 with value: 0.19813207537945543.
+[I 2026-11-17 01:25:28,189] Trial 32 finished with value: 0.2693280672801091 and parameters: {'threshold': 68.48517186032264, 'alpha': 25.336330540444653, 'beta': 13.630983231139112}. Best is trial 31 with value: 0.19813207537945543.
+[I 2026-11-17 01:25:33,405] Trial 33 finished with value: 0.20559321897158356 and parameters: {'threshold': 47.384544240345335, 'alpha': 38.106218450201965, 'beta': 21.91595687471303}. Best is trial 31 with value: 0.19813207537945543.
+[I 2026-11-17 01:25:38,506] Trial 34 finished with value: 0.20626428105116096 and parameters: {'threshold': 49.84962624741217, 'alpha': 32.57398861002797, 'beta': 38.10923286397917}. Best is trial 31 with value: 0.19813207537945543.
+[I 2026-11-17 01:25:43,282] Trial 35 finished with value: 0.2720123019522269 and parameters: {'threshold': 62.22625056677538, 'alpha': 35.00298337348947, 'beta': 35.507237431473506}. Best is trial 31 with value: 0.19813207537945543.
+[I 2026-11-17 01:25:48,090] Trial 36 finished with value: 0.19764393760788906 and parameters: {'threshold': 60.02306306099772, 'alpha': 39.92522118294124, 'beta': 26.724550147501063}. Best is trial 36 with value: 0.19764393760788906.
+[I 2026-11-17 01:25:53,085] Trial 37 finished with value: 0.20264927481963407 and parameters: {'threshold': 52.450181109995555, 'alpha': 38.96241932530704, 'beta': 34.061939258135766}. Best is trial 36 with value: 0.19764393760788906.
+[I 2026-11-17 01:25:57,915] Trial 38 finished with value: 0.19760482979092697 and parameters: {'threshold': 60.05298374217817, 'alpha': 39.14305279950335, 'beta': 28.596077340683717}. Best is trial 38 with value: 0.19760482979092697.
+[I 2026-11-17 01:26:03,377] Trial 39 finished with value: 0.21504621491580747 and parameters: {'threshold': 39.98812100517509, 'alpha': 36.234531857440516, 'beta': 34.13101399782718}. Best is trial 38 with value: 0.19760482979092697.
+[I 2026-11-17 01:26:08,047] Trial 40 finished with value: 0.2672125432929368 and parameters: {'threshold': 70.5763856035323, 'alpha': 38.601044031584024, 'beta': 29.862695703602483}. Best is trial 38 with value: 0.19760482979092697.
+[I 2026-11-17 01:26:13,085] Trial 41 finished with value: 0.20468283749991084 and parameters: {'threshold': 50.933944744260145, 'alpha': 33.728350630489295, 'beta': 27.472930100114063}. Best is trial 38 with value: 0.19760482979092697.
+[I 2026-11-17 01:26:19,018] Trial 42 finished with value: 0.2283607544045426 and parameters: {'threshold': 33.98915770059949, 'alpha': 36.835945837997485, 'beta': 29.051259823156283}. Best is trial 38 with value: 0.19760482979092697.
+[I 2026-11-17 01:26:23,539] Trial 43 finished with value: 0.2624688608798972 and parameters: {'threshold': 80.46077375792325, 'alpha': 36.55264403056588, 'beta': 26.58706280141226}. Best is trial 38 with value: 0.19760482979092697.
+[I 2026-11-17 01:26:28,351] Trial 44 finished with value: 0.19693061323586505 and parameters: {'threshold': 61.41492583470464, 'alpha': 39.23392565001349, 'beta': 25.562787238501794}. Best is trial 44 with value: 0.19693061323586505.
+[I 2026-11-17 01:26:33,273] Trial 45 finished with value: 0.20065136195883265 and parameters: {'threshold': 54.47835269618282, 'alpha': 38.58883282532315, 'beta': 27.893118281850178}. Best is trial 44 with value: 0.19693061323586505.
+[I 2026-11-17 01:26:38,068] Trial 46 finished with value: 0.271651466494054 and parameters: {'threshold': 62.78786322483544, 'alpha': 38.412871827847745, 'beta': 22.52178761557108}. Best is trial 44 with value: 0.19693061323586505.
+[I 2026-11-17 01:26:43,197] Trial 47 finished with value: 0.20742825118751554 and parameters: {'threshold': 49.20747411694937, 'alpha': 36.46730959082636, 'beta': 26.332559824697398}. Best is trial 44 with value: 0.19693061323586505.
+[I 2026-11-17 01:26:47,857] Trial 48 finished with value: 0.2699537156363078 and parameters: {'threshold': 67.20974970940807, 'alpha': 28.93569259956479, 'beta': 31.429732417038828}. Best is trial 44 with value: 0.19693061323586505.
+[I 2026-11-17 01:26:52,757] Trial 49 finished with value: 0.19857018434727955 and parameters: {'threshold': 58.1546514340833, 'alpha': 38.864462296252086, 'beta': 39.30637051718684}. Best is trial 44 with value: 0.19693061323586505.
+
+Iniciando búsqueda de la 'Trinidad' de parámetros...
+
+==================================================
+ RESULTADOS OPTIMIZADOS PARA TESIS
+==================================================
+Mejor Loss: 0.1969
+--- COPIA ESTOS VALORES EN evaluate_dataset.py ---
+FIXED_LOW_TH = 61.4149
+ALPHA_OPT    = 39.2339
+BETA_OPT     = 25.5628
+==================================================
+Log guardado en results/optuna_optimization_log.csv

@@ -98,8 +98,8 @@ class QualityMetrics:
             img1 = F.avg_pool2d(img1, (2, 2))
             img2 = F.avg_pool2d(img2, (2, 2))
 
-        mssim = torch.stack(mssim)
-        mcs = torch.stack(mcs)
+        mssim = torch.relu(torch.stack(mssim))
+        mcs = torch.relu(torch.stack(mcs))
         
         # MS-SSIM = Prod(MCS_i^weight_i) * SSIM_last^weight_last
         # Usamos clamp para evitar log(0)
@@ -121,7 +121,7 @@ class QualityMetrics:
         C2 = 0.03**2
         
         v1 = 2.0 * sigma12 + C2
-        v2 = sigma1**2 + sigma2**2 + C2
+        v2 = sigma1 + sigma2 + C2  # sigma1/sigma2 ya son varianzas
         
         cs = torch.mean(v1 / v2)  # Contrast structure
         ssim = torch.mean(((2 * mean1 * mean2 + C1) * v1) / ((mean1**2 + mean2**2 + C1) * v2))

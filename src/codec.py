@@ -10,7 +10,8 @@ class QuadtreeCodec:
     - Manejo de buffers directos.
     """
 
-    def compress(self, root: QuadtreeNode, shape: tuple, quality_factor: int = 50) -> bytes:
+    def compress(self, root: QuadtreeNode, shape: tuple, quality_factor: int = 50, qmap=None,
+                 qmap_strength: float = 0.0, qmap_cell: int = 32, qmap_levels: int = 4) -> bytes:
         h, w = shape
         
         # Reset states
@@ -27,7 +28,12 @@ class QuadtreeCodec:
         self._encode_recursive(root, structure_bits, payload_data)
         packed_structure = self._pack_bits(structure_bits)
         
-        header = struct.pack('>HHBB', h, w, 3, int(quality_factor))
+        if qmap is None:
+            header = struct.pack('>HHBB', h, w, 3, int(quality_factor))
+        else:  # versión 4: mapa de cuantización local (eta*16, celda, niveles, niveles por celda)
+            header = struct.pack('>HHBB', h, w, 4, int(quality_factor))
+            header += struct.pack('>BBB', int(round(qmap_strength * 16)), qmap_cell, qmap_levels)
+            header += np.asarray(qmap, dtype=np.uint8).tobytes()
         struct_len = struct.pack('>I', len(packed_structure))
         
         # Combine efficiently
@@ -48,6 +54,14 @@ class QuadtreeCodec:
         ptr = 0
         h, w, ver, quality = struct.unpack('>HHBB', full_payload[ptr:ptr+6])
         ptr += 6
+        self.qmap, self.qmap_strength, self.qmap_cell, self.qmap_levels = None, 0.0, 32, 4
+        if ver == 4:
+            eta16, self.qmap_cell, self.qmap_levels = struct.unpack('>BBB', full_payload[ptr:ptr+3])
+            ptr += 3
+            self.qmap_strength = eta16 / 16
+            n = h // self.qmap_cell
+            self.qmap = np.frombuffer(full_payload[ptr:ptr + n * n], dtype=np.uint8).reshape(n, n)
+            ptr += n * n
         
         struct_len = struct.unpack('>I', full_payload[ptr:ptr+4])[0]
         ptr += 4

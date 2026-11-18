@@ -1,0 +1,12 @@
+{
+  "baseline": {
+    "threshold": 0.0,
+    "alpha": 0.0,
+    "beta": 0.0
+  },
+  "transalnet_res": {
+    "threshold": 0.570690132467182,
+    "alpha": 19.663573318739054,
+    "beta": 19.98537641504256
+  }
+}

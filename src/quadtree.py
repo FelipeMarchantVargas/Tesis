@@ -87,12 +87,20 @@ class QuadtreeCompressor:
         # Cache for batch DCT results
         self._dct_cache_map = {} 
 
-    def compress(self, image_rgb: np.ndarray, saliency_map: np.ndarray, threshold: float, alpha: float, lam: float = 10.0, beta: float = 2.0):
+    def compress(self, image_rgb: np.ndarray, saliency_map: np.ndarray, threshold: float, alpha: float, lam: float = 10.0, beta: float = 2.0, normalize_weight: bool = False, weight_scale: float = 1.0, quality: int = None,
+                 qmap_strength: float = 0.0, qmap_cell: int = 32, qmap_levels: int = 4):
         self.orig_h, self.orig_w = image_rgb.shape[:2]
+        # normalize_weight: divide el peso (1 + beta*S) por su media en la imagen, de modo que
+        # lambda conserve su significado (precio del bit relativo a la distorsión media) para
+        # cualquier beta y las curvas RD cubran el mismo rango de tasas.
+        self._weight_norm = (1.0 + beta * float(np.mean(saliency_map))) if normalize_weight else 1.0
+        # weight_scale: factor uniforme k sobre la distorsión (equivale a usar lambda/k en el RDO
+        # manteniendo el factor de calidad DCT derivado de lambda).
+        self._weight_norm /= weight_scale
         
         # Dynamic Quality Calculation
         raw_q = 100 - 12.0 * math.log(lam + 1)
-        self.dynamic_quality = int(max(5, min(95, raw_q)))
+        self.dynamic_quality = int(max(5, min(95, raw_q))) if quality is None else int(quality)
         
         # Padding
         max_dim = max(self.orig_h, self.orig_w)
@@ -102,6 +110,17 @@ class QuadtreeCompressor:
         
         self._img = self._pad_image(image_rgb, next_pow2, next_pow2)
         saliency_padded = self._pad_image(saliency_map, next_pow2, next_pow2)
+
+        # Cuantización local guiada por saliencia (rediseño B). qmap_strength = eta = 0 -> códec original.
+        # La saliencia media de cada celda qmap_cell x qmap_cell se cuantiza a qmap_levels niveles;
+        # ese mapa viaja en el bitstream y escala la tabla DCT de cada bloque (ver qscale_for_level).
+        self.qmap_strength = round(float(qmap_strength) * 16) / 16  # se serializa como eta*16 (1 byte)
+        self.qmap_cell, self.qmap_levels = int(qmap_cell), int(qmap_levels)
+        self.qmap = None
+        if self.qmap_strength > 0:
+            n = next_pow2 // self.qmap_cell
+            cell_mean = saliency_padded.reshape(n, self.qmap_cell, n, self.qmap_cell).mean(axis=(1, 3))
+            self.qmap = np.clip((cell_mean * self.qmap_levels).astype(int), 0, self.qmap_levels - 1).astype(np.uint8)
         
         gray = cv2.cvtColor(self._img, cv2.COLOR_RGB2GRAY)
         self._integral_img = IntegralImageWrapper(gray)
@@ -128,6 +147,15 @@ class QuadtreeCompressor:
         self._integral_saliency = None
         self._dct_cache_map = {}
 
+    def qscale_for_level(self, levels):
+        """Factor de escala de la tabla DCT: 2^(eta*(0.5 - l)), l = (nivel + 0.5) / niveles."""
+        centers = (np.asarray(levels, dtype=np.float32) + 0.5) / self.qmap_levels
+        return np.power(2.0, self.qmap_strength * (0.5 - centers))
+
+    def quant_matrices_for_levels(self, q_matrix, levels):
+        scale = self.qscale_for_level(levels)[:, None, None]
+        return np.maximum(np.floor(q_matrix[None] * scale), 1.0)
+
     def _precompute_dct_grid(self, gray_img, quality):
         """
         Slices the image into 8x8 blocks, runs Batch DCT, and stores results for fast lookup.
@@ -143,6 +171,10 @@ class QuadtreeCompressor:
         flat_blocks_input = blocks.reshape(-1, 8, 8) - 128.0 # Centered
         
         q_matrix = dct_utils.get_quantization_matrix(quality)
+        if self.qmap is not None:
+            by, bx = np.divmod(np.arange(h_blocks * w_blocks), w_blocks)
+            levels = self.qmap[(by * 8) // self.qmap_cell, (bx * 8) // self.qmap_cell]
+            q_matrix = self.quant_matrices_for_levels(q_matrix, levels)  # (N, 8, 8)
         
         # --- VECTORIZED CALL ---
         coeffs, sse_errors, non_zeros = dct_utils.batch_dct_transform(flat_blocks_input, q_matrix)
@@ -193,7 +225,7 @@ class QuadtreeCompressor:
         # 1. Saliency via Integral Image O(1)
         s_sum, _ = self._integral_saliency.get_sum_and_sq_sum(node.y, node.x, node.h, node.w)
         mean_sal = s_sum / (node.h * node.w)
-        importance = 1.0 + (beta * (mean_sal / 255.0))
+        importance = (1.0 + (beta * (mean_sal / 255.0))) / self._weight_norm
 
         # 2. Flat Cost: Integral Image O(1)
         d_flat = self._integral_img.get_sse_flat(node.y, node.x, node.h, node.w) * importance
@@ -294,6 +326,9 @@ class QuadtreeCompressor:
         
         if node.mode == 'dct' and node.dct_coeffs is not None:
             q_matrix = dct_utils.get_quantization_matrix(q_factor)
+            if getattr(self, "qmap", None) is not None:
+                level = self.qmap[y // self.qmap_cell, x // self.qmap_cell]
+                q_matrix = self.quant_matrices_for_levels(q_matrix, np.array([level]))[0]
             rec_y = dct_utils.idct_reconstruct_block(node.dct_coeffs, q_matrix, shape=(h,w)) + 128.0
             rec_y = np.clip(rec_y, 0, 255)
 
