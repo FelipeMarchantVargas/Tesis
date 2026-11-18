@@ -137,7 +137,9 @@ def _run_image(task):
 def run(args):
     OUT.mkdir(parents=True, exist_ok=True)
     split = pd.read_csv(DER / "split.csv")
-    stems = sorted(split.loc[split.split == args.split, "image"])[: args.limit or None]
+    stems = sorted(split.loc[split.split == args.split, "image"])
+    if args.limit:  # muestra al azar: los nombres de MIT1003 vienen agrupados por serie
+        stems = sorted(np.random.default_rng(42).choice(stems, size=args.limit, replace=False))
     f = OUT / f"grid_{args.split}.csv"
     done = set(pd.read_csv(f).image) if f.exists() else set()
     todo = [s for s in stems if s not in done]
