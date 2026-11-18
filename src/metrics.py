@@ -187,9 +187,33 @@ def fw_lpips(lpips_map, G):
     return float(np.sum(G * lpips_map))
 
 
-def fw_ssim(original, reconstructed, G):
+def ssim_gray_map(original, reconstructed):
+    """Mapa SSIM (h, w), promedio de los canales RGB; calcularlo una vez y ponderarlo con varios G."""
     _, smap = ssim_func(original, reconstructed, data_range=255, channel_axis=2, full=True)
-    return float(np.sum(G * smap.mean(axis=2)))
+    return smap.mean(axis=2)
+
+
+def fw_ssim(original, reconstructed, G, ssim_map=None):
+    m = ssim_gray_map(original, reconstructed) if ssim_map is None else ssim_map
+    return float(np.sum(G * m))
+
+
+def lpips_global_and_spatial(model, in0, in1):
+    """LPIPS global y espacial en una sola pasada, idénticos a lpips.LPIPS(spatial=False/True).
+
+    model: lpips.LPIPS (versión 0.1, con capas lineales); in0, in1: tensores (B, 3, H, W) en [-1, 1].
+    Devuelve (global (B,), mapas (B, H, W)). Replica lpips.LPIPS.forward: las diferencias de features
+    son las mismas; solo cambia el paso final (promedio espacial vs. upsample bilineal al tamaño de entrada).
+    """
+    import lpips as _lp
+    with torch.no_grad():
+        o0, o1 = model.net.forward(model.scaling_layer(in0)), model.net.forward(model.scaling_layer(in1))
+        glob, spatial = 0, 0
+        for kk in range(model.L):
+            d = model.lins[kk]((_lp.normalize_tensor(o0[kk]) - _lp.normalize_tensor(o1[kk])) ** 2)
+            glob = glob + d.mean([2, 3], keepdim=True)
+            spatial = spatial + F.interpolate(d, size=in0.shape[2:], mode="bilinear", align_corners=False)
+    return glob[:, 0, 0, 0], spatial[:, 0]
 
 
 def background_weights(G):

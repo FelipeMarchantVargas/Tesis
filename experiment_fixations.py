@@ -13,9 +13,13 @@ Uso:
   python experiment_fixations.py run --split calib --limit 30 --etas 1 2     # piloto
   python experiment_fixations.py analyze --split calib
 Salidas en results/v2/fixations/.
+
+Ejecución: los procesos de CPU codifican una configuración (brazo, eta) con sus 49 puntos y calculan
+PSNR/SSIM; el proceso principal calcula LPIPS (global y espacial en una sola pasada) en la GPU si hay.
+Las imágenes se procesan una tras otra y cada una se escribe completa (reanudable por imagen).
 """
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+_CUDA_ENV = os.environ.get("CUDA_VISIBLE_DEVICES")
 
 import argparse
 import json
@@ -33,6 +37,12 @@ from experiment_hull import LAMBDAS, QUALITIES, bd_rate_interp, pareto
 from prepare_fixations import points
 from src.fixations import fixation_density, rank_normalize_cells
 
+# experiment_hull (vía calibrate) oculta la GPU al importarse; aquí la usa el principal para LPIPS.
+if _CUDA_ENV is None:
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+else:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _CUDA_ENV
+
 ROOT = Path("data/mit1003")
 DER = ROOT / "derived"
 OUT = Path("results/v2/fixations")
@@ -45,15 +55,11 @@ _ctx = {}
 
 
 def _init():
+    """Contexto de datos (procesos de CPU y principal). Sin LPIPS: lo calcula el principal."""
     global _ctx
-    import lpips
-    import torch
-    torch.set_num_threads(1)
     cv2.setNumThreads(1)
     cfg = json.loads((DER / "config.json").read_text())
-    _ctx = {"cfg": cfg, "fix": pd.read_csv(DER / "fixations.csv"), "cb": np.load(DER / "center_bias.npy"),
-            "lp_spatial": lpips.LPIPS(net="alex", spatial=True, verbose=False).eval(),
-            "lp": lpips.LPIPS(net="alex", verbose=False).eval()}
+    _ctx = {"cfg": cfg, "fix": pd.read_csv(DER / "fixations.csv"), "cb": np.load(DER / "center_bias.npy")}
 
 
 def density(stem, h, w, half=None):
@@ -100,38 +106,80 @@ def encode_decode(img, guide, eta, lam, q):
     return dec.reconstruct(root, override_quality=qq), len(bs) * 8 / (h * w)
 
 
-def _run_image(task):
-    """Todas las codificaciones (brazos x eta x lambda x Q) de una imagen."""
-    import torch
+def load_image(stem):
+    return cv2.cvtColor(cv2.imread(str(ROOT / "ALLSTIMULI" / f"{stem}.jpeg")), cv2.COLOR_BGR2RGB)
+
+
+def densities(stem, h, w):
+    return {"full": density(stem, h, w), "A": density(stem, h, w, "A"), "B": density(stem, h, w, "B")}
+
+
+def _run_config(task):
+    """Proceso de CPU: las 49 codificaciones de (imagen, brazo, eta) con PSNR y SSIM ponderados.
+
+    Devuelve las filas parciales y las reconstrucciones (uint8) para que el principal calcule LPIPS.
+    """
     from skimage.metrics import peak_signal_noise_ratio
-    from src.metrics import background_weights, fw_lpips, fw_psnr, fw_ssim, lpips_spatial_map
-    stem, arms, etas = task
-    img = cv2.cvtColor(cv2.imread(str(ROOT / "ALLSTIMULI" / f"{stem}.jpeg")), cv2.COLOR_BGR2RGB)
+    from src.metrics import fw_psnr, fw_ssim, ssim_gray_map
+    stem, arm, eta = task
+    img = load_image(stem)
     h, w = img.shape[:2]
-    Gs = {"full": density(stem, h, w), "A": density(stem, h, w, "A"), "B": density(stem, h, w, "B")}
-    bg = background_weights(Gs["full"])
+    Gs = densities(stem, h, w)
+    guide = None if arm == "base" else guide_map(arm, stem, h, w)
+    rows, recs = [], []
+    for lam in LAMBDAS:
+        for q in QUALITIES:
+            rec, bpp = encode_decode(img, guide, eta, lam, q)
+            sm = ssim_gray_map(img, rec)
+            r = {"image": stem, "arm": arm, "eta": eta, "lam": lam, "q": q, "bpp": bpp,
+                 "psnr": peak_signal_noise_ratio(img, rec, data_range=255)}
+            for g, G in Gs.items():
+                r[f"fw_psnr_{g}"] = fw_psnr(img, rec, G)
+                r[f"fw_ssim_{g}"] = fw_ssim(img, rec, G, ssim_map=sm)
+            rows.append(r)
+            recs.append(rec)
+    return stem, rows, recs
 
-    def t(x):
-        return torch.from_numpy(x.astype(np.float32).transpose(2, 0, 1)[None] / 127.5 - 1.0)
 
-    rows = []
-    for arm, eta in [("base", 0.0)] + [(a, e) for a in arms for e in etas]:
-        guide = None if arm == "base" else guide_map(arm, stem, h, w)
-        for lam in LAMBDAS:
-            for q in QUALITIES:
-                rec, bpp = encode_decode(img, guide, eta, lam, q)
-                lm = lpips_spatial_map(_ctx["lp_spatial"], img, rec)
-                with torch.no_grad():
-                    lp = _ctx["lp"](t(img), t(rec)).item()
-                r = {"image": stem, "arm": arm, "eta": eta, "lam": lam, "q": q, "bpp": bpp,
-                     "lpips": lp, "psnr": peak_signal_noise_ratio(img, rec, data_range=255),
-                     "bg_lpips": fw_lpips(lm, bg)}
-                for g, G in Gs.items():
-                    r[f"fw_lpips_{g}"] = fw_lpips(lm, G)
-                    r[f"fw_psnr_{g}"] = fw_psnr(img, rec, G)
-                    r[f"fw_ssim_{g}"] = fw_ssim(img, rec, G)
-                rows.append(r)
-    return rows
+class LpipsScorer:
+    """LPIPS en el proceso principal (GPU si hay): global, espacial ponderado por G y fondo."""
+
+    def __init__(self, batch=7):
+        import lpips
+        import torch
+        self.torch = torch
+        self.dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = lpips.LPIPS(net="alex", verbose=False).eval().to(self.dev)
+        self.batch = batch
+        self._stem = None
+
+    def _prepare(self, stem):
+        from src.metrics import background_weights
+        if stem != self._stem:
+            img = load_image(stem)
+            h, w = img.shape[:2]
+            self.ref = self._t(img[None])
+            dens = densities(stem, h, w)
+            self.Gs = {k: self.torch.from_numpy(v).float().to(self.dev) for k, v in dens.items()}
+            self.bg = self.torch.from_numpy(background_weights(dens["full"])).float().to(self.dev)
+            self._stem = stem
+
+    def _t(self, x):
+        return self.torch.from_numpy(np.ascontiguousarray(x.transpose(0, 3, 1, 2))).to(self.dev).float() / 127.5 - 1.0
+
+    def score(self, stem, rows, recs):
+        from src.metrics import lpips_global_and_spatial
+        self._prepare(stem)
+        for a in range(0, len(recs), self.batch):
+            x = self._t(np.stack(recs[a:a + self.batch]))
+            glob, maps = lpips_global_and_spatial(self.model, self.ref.expand(len(x), -1, -1, -1), x)
+            for k, r in enumerate(rows[a:a + self.batch]):
+                m = maps[k]
+                r["lpips"] = float(glob[k])
+                r["bg_lpips"] = float((self.bg * m).sum())
+                for g, G in self.Gs.items():
+                    r[f"fw_lpips_{g}"] = float((G * m).sum())
+        return rows
 
 
 def run(args):
@@ -143,13 +191,32 @@ def run(args):
     f = OUT / f"grid_{args.split}.csv"
     done = set(pd.read_csv(f).image) if f.exists() else set()
     todo = [s for s in stems if s not in done]
+    if args.max_new:  # tope de imágenes nuevas en esta ejecución (en orden)
+        todo = todo[: args.max_new]
+    configs = [("base", 0.0)] + [(a, e) for a in args.arms for e in args.etas]
     print(f"{len(todo)} imágenes pendientes de {len(stems)}; brazos {args.arms}, eta {args.etas}", flush=True)
-    t0 = time.time()
+    tasks = [(s, a, e) for s in todo for a, e in configs]  # imagen por imagen
+    pending = {s: [] for s in todo}
+    cols = None
+    if f.exists():
+        cols = list(pd.read_csv(f, nrows=0).columns)
+    t0, n_done = time.time(), 0
+    # El Pool se crea antes de tocar CUDA en el principal (los procesos hijos nacen por fork).
     with Pool(args.workers or os.cpu_count(), initializer=_init) as pool:
-        for i, rows in enumerate(pool.imap_unordered(_run_image, [(s, args.arms, args.etas) for s in todo]), 1):
-            pd.DataFrame(rows).to_csv(f, mode="a", header=not f.exists(), index=False)
-            el = time.time() - t0
-            print(f"  {i}/{len(todo)}  {el / i:.0f} s/imagen  (restan ~{el / i * (len(todo) - i) / 60:.0f} min)", flush=True)
+        _init()
+        scorer = LpipsScorer()
+        print(f"LPIPS en {scorer.dev}", flush=True)
+        for stem, rows, recs in pool.imap_unordered(_run_config, tasks):
+            pending[stem] += scorer.score(stem, rows, recs)
+            if len(pending[stem]) == len(configs) * len(LAMBDAS) * len(QUALITIES):
+                df = pd.DataFrame(pending.pop(stem))
+                df = df[cols] if cols else df
+                df.to_csv(f, mode="a", header=not f.exists(), index=False)
+                cols = list(df.columns)
+                n_done += 1
+                el = time.time() - t0
+                print(f"  {n_done}/{len(todo)}  {stem}  {el / n_done:.0f} s/imagen  "
+                      f"(restan ~{el / n_done * (len(todo) - n_done) / 60:.0f} min)", flush=True)
 
 
 def per_image_bd(g, arm, eta, metric):
@@ -197,6 +264,7 @@ if __name__ == "__main__":
     r.add_argument("--arms", nargs="+", default=ARMS, choices=ARMS)
     r.add_argument("--etas", nargs="+", type=float, default=[0.5, 1.0, 2.0, 3.0])
     r.add_argument("--workers", type=int, default=0)
+    r.add_argument("--max-new", type=int, default=0)
     a = sub.add_parser("analyze")
     a.add_argument("--split", default="calib", choices=["calib", "test"])
     a.add_argument("--min-overlap", type=float, default=0.5)

@@ -78,6 +78,31 @@ def test_fw_lpips_uniform_matches_global_lpips():
     assert np.isclose(fw_lpips(m, np.full((64, 64), 1 / 64 ** 2)), g, rtol=0.05)
 
 
+def test_single_pass_lpips_matches_both_lpips_models():
+    import lpips
+    import torch
+    from src.metrics import lpips_global_and_spatial
+    rng = np.random.default_rng(4)
+    a = (rng.random((2, 48, 64, 3)) * 255).astype(np.uint8)
+    b = np.clip(a.astype(int) + rng.integers(-30, 30, a.shape), 0, 255).astype(np.uint8)
+    t = lambda x: torch.from_numpy(x.astype(np.float32).transpose(0, 3, 1, 2) / 127.5 - 1)  # noqa: E731
+    model = lpips.LPIPS(net="alex", verbose=False).eval()
+    spatial = lpips.LPIPS(net="alex", spatial=True, verbose=False).eval()
+    glob, maps = lpips_global_and_spatial(model, t(a), t(b))
+    with torch.no_grad():
+        ref_g, ref_m = model(t(a), t(b))[:, 0, 0, 0], spatial(t(a), t(b))[:, 0]
+    assert torch.allclose(glob, ref_g, atol=1e-6) and torch.allclose(maps, ref_m, atol=1e-6)
+
+
+def test_fw_ssim_with_precomputed_map_is_identical():
+    from src.metrics import fw_ssim, ssim_gray_map
+    rng = np.random.default_rng(5)
+    a = (rng.random((40, 50, 3)) * 255).astype(np.uint8)
+    b = np.clip(a.astype(int) + rng.integers(-20, 20, a.shape), 0, 255).astype(np.uint8)
+    G = fixation_density([(10, 10), (40, 30)], (40, 50), sigma=5)
+    assert fw_ssim(a, b, G) == fw_ssim(a, b, G, ssim_map=ssim_gray_map(a, b))
+
+
 def test_rank_normalized_guide_gives_balanced_qmap():
     for shape in [(96, 128), (100, 130)]:
         _check_balanced_qmap(shape)
