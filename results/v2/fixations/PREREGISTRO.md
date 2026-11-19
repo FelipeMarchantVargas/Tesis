@@ -49,3 +49,9 @@ reales» en la bóveda de la memoria. Piloto (calibración, 16 imágenes): `bd_s
 - LPIPS calculado en GPU (diferencia relativa < 1e-6 frente a CPU).
 - Piloto con 16 imágenes en vez de 30 (por costo).
 - El código de las pruebas H0–H2 se escribe después de este registro, siguiendo exactamente este texto.
+
+## Adenda (2026-11-18, antes de ver resultados de prueba)
+- **H0 con exclusiones:** una imagen entra en H0 solo si las dos comparaciones del oráculo (A→B y B→A)
+  cumplen el solape mínimo; si una falla, la imagen se excluye de H0.
+- **Implementación:** `prereg_tests.py` (tests en `tests/test_prereg.py`), validado solo con el piloto
+  (`--split calib`). Se corre una vez sobre la prueba con `python prereg_tests.py --split test`.

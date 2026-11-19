@@ -236,24 +236,34 @@ def run(args):
                       f"(restan ~{el / n_done * (len(todo) - n_done) / 60:.0f} min)", flush=True)
 
 
-def per_image_bd(g, arm, eta, metric):
-    """BD-Rate por imagen de (arm, eta) frente a base sobre la métrica `metric` (columna base, sin sufijo)."""
-    gset = EVAL.get(arm, "full")
-    col = f"{metric}_{gset}" if metric in QUALITY_COLS else metric
-    lower_better = "lpips" in metric
-    out = []
+def pair_bd(g, ref, cand, col, lower_better):
+    """BD-Rate por imagen de cand = (brazo, eta) frente a ref = (brazo, eta) sobre la columna `col`.
+
+    Frente de Pareto de cada uno sobre la calidad; solape relativo al rango de calidad de la referencia.
+    Devuelve {imagen: (bd, solape)}.
+    """
+    sign = -1.0 if lower_better else 1.0
+    out = {}
     for stem, d in g.groupby("image"):
-        a = d[d.arm == "base"].assign(qual=lambda x: -x[col] if lower_better else x[col])
-        b = d[(d.arm == arm) & (d.eta == eta)].assign(qual=lambda x: -x[col] if lower_better else x[col])
+        a = d[(d.arm == ref[0]) & (d.eta == ref[1])].assign(qual=lambda x: sign * x[col])
+        b = d[(d.arm == cand[0]) & (d.eta == cand[1])].assign(qual=lambda x: sign * x[col])
         if a.empty or b.empty:
             continue
         ra, qa = pareto(a, "qual")
         rb, qb = pareto(b, "qual")
         lo, hi = max(qa.min(), qb.min()), min(qa.max(), qb.max())
         overlap = max(0.0, hi - lo) / (qa.max() - qa.min()) if qa.max() > qa.min() else 0.0
-        out.append({"image": stem, "arm": arm, "eta": eta, "metric": metric, "eval_g": gset,
-                    "bd": bd_rate_interp(ra, qa, rb, qb), "overlap": overlap})
+        out[stem] = (bd_rate_interp(ra, qa, rb, qb), overlap)
     return out
+
+
+def per_image_bd(g, arm, eta, metric):
+    """BD-Rate por imagen de (arm, eta) frente a base sobre la métrica `metric` (columna base, sin sufijo)."""
+    gset = EVAL.get(arm, "full")
+    col = f"{metric}_{gset}" if metric in QUALITY_COLS else metric
+    res = pair_bd(g, ("base", 0.0), (arm, eta), col, "lpips" in metric)
+    return [{"image": s, "arm": arm, "eta": eta, "metric": metric, "eval_g": gset, "bd": bd, "overlap": ov}
+            for s, (bd, ov) in res.items()]
 
 
 def analyze(args):
