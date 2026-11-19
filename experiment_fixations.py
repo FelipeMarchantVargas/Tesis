@@ -189,11 +189,20 @@ def run(args):
     if args.limit:  # muestra al azar: los nombres de MIT1003 vienen agrupados por serie
         stems = sorted(np.random.default_rng(42).choice(stems, size=args.limit, replace=False))
     f = OUT / f"grid_{args.split}.csv"
-    done = set(pd.read_csv(f).image) if f.exists() else set()
+    configs = [("base", 0.0)] + [(a, e) for a in args.arms for e in args.etas]
+    expected = len(configs) * len(LAMBDAS) * len(QUALITIES)
+    done = set()
+    if f.exists():  # reanudación tolerante a un apagón a mitad de escritura
+        g = pd.read_csv(f, on_bad_lines="skip").dropna(subset=["image", "fw_lpips_full"])
+        n = g.groupby("image").size()
+        complete = n[n == expected].index
+        if len(complete) < len(n) or len(g) < sum(1 for _ in open(f)) - 1:
+            print(f"descartando {len(n) - len(complete)} imágenes incompletas/filas dañadas", flush=True)
+            g[g.image.isin(complete)].to_csv(f, index=False)
+        done = set(complete)
     todo = [s for s in stems if s not in done]
     if args.max_new:  # tope de imágenes nuevas en esta ejecución (en orden)
         todo = todo[: args.max_new]
-    configs = [("base", 0.0)] + [(a, e) for a in args.arms for e in args.etas]
     print(f"{len(todo)} imágenes pendientes de {len(stems)}; brazos {args.arms}, eta {args.etas}", flush=True)
     tasks = [(s, a, e) for s in todo for a, e in configs]  # imagen por imagen
     pending = {s: [] for s in todo}
@@ -208,10 +217,14 @@ def run(args):
         print(f"LPIPS en {scorer.dev}", flush=True)
         for stem, rows, recs in pool.imap_unordered(_run_config, tasks):
             pending[stem] += scorer.score(stem, rows, recs)
-            if len(pending[stem]) == len(configs) * len(LAMBDAS) * len(QUALITIES):
+            if len(pending[stem]) == expected:
                 df = pd.DataFrame(pending.pop(stem))
                 df = df[cols] if cols else df
-                df.to_csv(f, mode="a", header=not f.exists(), index=False)
+                header = not f.exists()
+                with open(f, "a") as fh:  # una escritura por imagen, forzada a disco
+                    df.to_csv(fh, header=header, index=False)
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 cols = list(df.columns)
                 n_done += 1
                 el = time.time() - t0
