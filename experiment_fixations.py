@@ -188,6 +188,10 @@ def run(args):
     stems = sorted(split.loc[split.split == args.split, "image"])
     if args.limit:  # muestra al azar: los nombres de MIT1003 vienen agrupados por serie
         stems = sorted(np.random.default_rng(42).choice(stems, size=args.limit, replace=False))
+    if args.images_file:  # lista fija (p. ej. la pre-registrada)
+        listed = [x for x in Path(args.images_file).read_text().split() if x]
+        assert set(listed) <= set(stems), "la lista contiene imágenes fuera de la partición"
+        stems = sorted(listed)
     f = OUT / f"grid_{args.split}.csv"
     configs = [("base", 0.0)] + [(a, e) for a in args.arms for e in args.etas]
     expected = len(configs) * len(LAMBDAS) * len(QUALITIES)
@@ -278,6 +282,7 @@ if __name__ == "__main__":
     r.add_argument("--etas", nargs="+", type=float, default=[0.5, 1.0, 2.0, 3.0])
     r.add_argument("--workers", type=int, default=0)
     r.add_argument("--max-new", type=int, default=0)
+    r.add_argument("--images-file", default="")
     a = sub.add_parser("analyze")
     a.add_argument("--split", default="calib", choices=["calib", "test"])
     a.add_argument("--min-overlap", type=float, default=0.5)
